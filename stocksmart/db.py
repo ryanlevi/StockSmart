@@ -57,6 +57,14 @@ class Database:
                 CREATE TABLE IF NOT EXISTS worker_health (
                     id INTEGER PRIMARY KEY CHECK(id=1), heartbeat REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS retailer_state (
+                    id INTEGER PRIMARY KEY CHECK(id=1),
+                    blocked_until REAL NOT NULL DEFAULT 0,
+                    block_streak INTEGER NOT NULL DEFAULT 0,
+                    last_request REAL NOT NULL DEFAULT 0,
+                    message TEXT NOT NULL DEFAULT ''
+                );
+                INSERT OR IGNORE INTO retailer_state(id) VALUES(1);
             ''')
         self.path.chmod(0o600)
 
@@ -96,6 +104,10 @@ class Database:
         with self.connect() as conn:
             row = conn.execute('SELECT * FROM alerts WHERE id=?', (alert_id,)).fetchone()
             return dict(row) if row else None
+
+    def retailer(self):
+        with self.connect() as conn:
+            return dict(conn.execute('SELECT * FROM retailer_state WHERE id=1').fetchone())
 
     @staticmethod
     def event(conn, alert_id, status, message, now):

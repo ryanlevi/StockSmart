@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 from stocksmart import create_app
 from stocksmart.db import Database, DEFAULT_SETTINGS
-from stocksmart.inventory import CheckFailure, Inventory, parse_inventory, product_url, validate_url
+from stocksmart.inventory import BrowserChecker, CheckFailure, Inventory, parse_inventory, product_url, validate_url
 from stocksmart.mail import send_message
 from stocksmart.stores import STORES
 from stocksmart.worker import run_check
@@ -185,31 +185,33 @@ class AppTests(unittest.TestCase):
         self.create(True)
         settings = dict(DEFAULT_SETTINGS, enabled=True, sender='me@example.com', recipient='me@example.com')
         self.db.save_settings(settings)
+        now = [time.time()]
         sender = Mock()
         checker = Mock()
         checker.check.return_value = Inventory('Monitor', True, '1', '$200.00', '1 open box', 'listing-a')
-        run_check(self.db, self.db.alert(1), checker, sender)
+        run_check(self.db, self.db.alert(1), checker, sender, clock=lambda: now[0])
         self.assertEqual(sender.call_count, 1)
-        run_check(self.db, self.db.alert(1), checker, sender)
+        run_check(self.db, self.db.alert(1), checker, sender, clock=lambda: now[0])
         self.assertEqual(sender.call_count, 1)
         checker.check.side_effect = CheckFailure('Verification', 'blocked')
-        run_check(self.db, self.db.alert(1), checker, sender)
+        run_check(self.db, self.db.alert(1), checker, sender, clock=lambda: now[0])
         self.assertEqual(self.db.alert(1)['status'], 'blocked')
         self.assertEqual(self.db.alert(1)['last_sent_signature'], 'listing-a')
         self.assertGreater(self.db.alert(1)['next_check'] - time.time(), 895)
+        now[0] = self.db.retailer()['blocked_until'] + 1
         checker.check.side_effect = None
-        run_check(self.db, self.db.alert(1), checker, sender)
+        run_check(self.db, self.db.alert(1), checker, sender, clock=lambda: now[0])
         self.assertEqual(sender.call_count, 1)
         checker.check.return_value = Inventory('Monitor', False, '0', None, '0 open box', 'empty')
-        run_check(self.db, self.db.alert(1), checker, sender)
+        run_check(self.db, self.db.alert(1), checker, sender, clock=lambda: now[0])
         self.assertIsNone(self.db.alert(1)['last_sent_signature'])
         checker.check.return_value = Inventory('Monitor', True, '1', '$200.00', '1 open box', 'listing-b')
         sender.side_effect = smtplib.SMTPAuthenticationError(535, b'secret provider details')
-        run_check(self.db, self.db.alert(1), checker, sender)
+        run_check(self.db, self.db.alert(1), checker, sender, clock=lambda: now[0])
         self.assertIsNone(self.db.alert(1)['last_sent_signature'])
         self.assertNotIn('secret', self.db.alert(1)['notification_error'])
         sender.side_effect = None
-        run_check(self.db, self.db.alert(1), checker, sender)
+        run_check(self.db, self.db.alert(1), checker, sender, clock=lambda: now[0])
         self.assertEqual(self.db.alert(1)['last_sent_signature'], 'listing-b')
         self.assertIsNone(self.db.alert(1)['notification_error'])
 
@@ -261,6 +263,157 @@ class MailTests(unittest.TestCase):
         session = smtp.return_value.__enter__.return_value
         session.starttls.assert_not_called()
         session.send_message.assert_called_once()
+
+
+
+class FakeTime:
+    def __init__(self):
+        self.now = 0
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class FakeBrowser:
+    def __init__(self, pages):
+        self.pages = pages
+        self.reads = 0
+        self.urls = []
+        self.current_url = URL + '?storeid=101'
+        self.closed = False
+
+    def set_page_load_timeout(self, seconds):
+        pass
+
+    def get(self, url):
+        self.urls.append(url)
+        self.current_url = url
+        self.reads = 0
+
+    @property
+    def page_source(self):
+        result = self.pages[min(self.reads, len(self.pages)-1)]
+        self.reads += 1
+        return result
+
+    def quit(self):
+        self.closed = True
+
+
+class BrowserRecoveryTests(unittest.TestCase):
+    def alert(self, open_box=False, product='685416'):
+        return {'url': URL.replace('685416', product), 'product_id': product, 'store_id': '101', 'open_box': open_box}
+
+    def test_transient_interstitial_can_finish_without_another_navigation(self):
+        clock = FakeTime()
+        browser = FakeBrowser(['<title>Just a moment...</title>', page()])
+        checker = BrowserChecker(factory=lambda: browser, clock=clock.clock, sleep=clock.sleep, wait_seconds=3)
+        self.assertTrue(checker.check(self.alert()).available)
+        self.assertEqual(len(browser.urls), 1)
+        self.assertNotEqual(clock.now, 0)
+        checker.close()
+        self.assertTrue(browser.closed)
+
+    def test_persistent_challenge_has_bounded_wait(self):
+        clock = FakeTime()
+        browser = FakeBrowser(['<title>Just a moment...</title>'])
+        checker = BrowserChecker(factory=lambda: browser, clock=clock.clock, sleep=clock.sleep, wait_seconds=3)
+        with self.assertRaises(CheckFailure) as caught:
+            checker.check(self.alert())
+        self.assertEqual(caught.exception.status, 'blocked')
+        self.assertEqual(clock.now, 3)
+        self.assertEqual(browser.urls[-1], 'about:blank')
+        self.assertEqual(sum('microcenter.com' in url for url in browser.urls), 1)
+
+    def test_same_product_new_and_openbox_share_one_page(self):
+        clock = FakeTime()
+        browser = FakeBrowser([page(openbox='1 Open Box: from $99.00 ID: 1')])
+        factory = Mock(return_value=browser)
+        checker = BrowserChecker(factory=factory, clock=clock.clock, sleep=clock.sleep)
+        self.assertTrue(checker.check(self.alert()).available)
+        self.assertTrue(checker.check(self.alert(True)).available)
+        self.assertEqual(len(browser.urls), 1)
+        factory.assert_called_once()
+
+    def test_distinct_products_reuse_browser_and_space_requests(self):
+        clock = FakeTime()
+        browser = FakeBrowser([page()])
+        factory = Mock(return_value=browser)
+        checker = BrowserChecker(factory=factory, clock=clock.clock, sleep=clock.sleep)
+        checker.check(self.alert())
+        checker.check(self.alert(product='685417'))
+        self.assertEqual(len(browser.urls), 2)
+        self.assertEqual(checker.last_navigation, 15)
+        self.assertEqual(clock.now, 25)
+        factory.assert_called_once()
+
+    def test_new_stock_cache_waits_for_delayed_openbox_markup(self):
+        clock = FakeTime()
+        browser = FakeBrowser([page(), page(openbox='1 Open Box: from $99.00 ID: 1')])
+        checker = BrowserChecker(factory=lambda: browser, clock=clock.clock, sleep=clock.sleep)
+        self.assertTrue(checker.check(self.alert()).available)
+        self.assertTrue(checker.check(self.alert(True)).available)
+        self.assertEqual(len(browser.urls), 1)
+
+    def test_normal_cloudflare_script_does_not_mark_a_product_blocked(self):
+        html = page() + '<script>var x="cf-chl-foo just a moment";</script>'
+        self.assertTrue(parse_inventory(html, '101').available)
+
+    def test_lost_browser_restarts_on_next_check(self):
+        from selenium.common.exceptions import WebDriverException
+        clock = FakeTime()
+        broken = Mock()
+        broken.get.side_effect = WebDriverException('disconnected')
+        replacement = FakeBrowser([page()])
+        factory = Mock(side_effect=[broken, replacement])
+        checker = BrowserChecker(factory=factory, clock=clock.clock, sleep=clock.sleep)
+        with self.assertRaises(CheckFailure):
+            checker.check(self.alert())
+        broken.quit.assert_called_once()
+        self.assertTrue(checker.check(self.alert()).available)
+        self.assertEqual(factory.call_count, 2)
+
+
+class CooldownTests(unittest.TestCase):
+    setUp = AppTests.setUp
+    tearDown = AppTests.tearDown
+    create = AppTests.create
+    post = AppTests.post
+
+    def test_shared_block_stops_other_alerts_and_survives_database_reopen(self):
+        self.create()
+        self.create(True)
+        now = [time.time()]
+        checker = Mock()
+        checker.check.side_effect = CheckFailure('Verification required', 'blocked')
+        run_check(self.db, self.db.alert(1), checker, clock=lambda: now[0])
+        reopened = Database(self.temp.name)
+        run_check(reopened, reopened.alert(2), checker, clock=lambda: now[0])
+        self.assertEqual(checker.check.call_count, 1)
+        self.assertEqual(reopened.retailer()['block_streak'], 1)
+        self.assertEqual(reopened.alert(2)['status'], 'blocked')
+        self.assertIsNone(reopened.alert(2)['last_checked'])
+        self.assertIn(b'Micro Center is requesting verification', self.client.get('/').data)
+        self.post('/alerts/2/check')
+        self.assertGreater(self.db.alert(2)['next_check'], now[0])
+
+    def test_repeated_blocks_back_off_and_success_resets_streak(self):
+        self.create()
+        now = [time.time()]
+        checker = Mock()
+        checker.check.side_effect = CheckFailure('Verification required', 'blocked')
+        for expected in [900, 1800, 3600, 7200, 14400, 14400]:
+            run_check(self.db, self.db.alert(1), checker, clock=lambda: now[0])
+            self.assertEqual(self.db.retailer()['blocked_until'] - now[0], expected)
+            now[0] = self.db.retailer()['blocked_until'] + 1
+        checker.check.side_effect = None
+        checker.check.return_value = Inventory('Monitor', False, '0', None, 'Sold out', 'empty')
+        run_check(self.db, self.db.alert(1), checker, clock=lambda: now[0])
+        self.assertEqual(self.db.retailer()['block_streak'], 0)
+        self.assertEqual(self.db.retailer()['blocked_until'], 0)
 
 
 if __name__ == '__main__':

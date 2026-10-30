@@ -2,7 +2,7 @@
 
 A self-hosted web dashboard for Micro Center stock alerts. Watch a product at a specific store, choose regular new stock or open-box inventory, and receive email when availability changes.
 
-This project is a fork of [ayoTyler/StockSmart](https://github.com/ayoTyler/StockSmart), originally created by [ayoTyler](https://github.com/ayoTyler) as the Micro Center Stock Application (MCSA). This fork adds the web UI, persistent alerts, store selection, open-box tracking, and background notification worker. The original `MCSA.py` is retained.
+This project is a fork of [ayoTyler/StockSmart](https://github.com/ayoTyler/StockSmart), originally created by [ayoTyler](https://github.com/ayoTyler) as the Micro Center Stock Application (MCSA). This fork adds the web UI, persistent alerts, store selection, open-box tracking, and background notification worker. The web application replaces the original terminal script.
 
 [Buy me a coffee](https://buymeacoffee.com/ryanlevi)
 
@@ -101,12 +101,13 @@ A notification is sent when stock is first found and again after it becomes unav
 ## Polling and current limitations
 
 - The default check interval is five minutes, configurable globally.
-- Verification-blocked checks wait at least 15 minutes before retrying.
+- Verification-blocked checks pause all alerts. Repeated blocks back off for 15, 30, 60, 120, then at most 240 minutes. The cooldown survives worker restarts and manual checks cannot bypass it.
+- A persistent, unmodified Chrome profile is shared by the worker. Product pages are loaded directly, transient interstitials get up to 30 seconds to finish, distinct requests are spaced by at least 15 seconds, and a successful product page can serve both alert types for 60 seconds.
 - Stock is parsed only from the primary product purchase region and must identify the selected store. Related products and other-store availability are excluded.
 - Blocked, timed-out, and unrecognized pages are reported separately from sold-out stock.
 - Stock can sell out before an email arrives; an alert does not reserve inventory.
 
-**Micro Center may block automated browser access with a Cloudflare verification page.** This occurred during the initial deployment. The UI and worker correctly report **Blocked by Micro Center** and retry, but live successful inventory extraction could not be verified from that deployment. There is no CAPTCHA bypass. Open-box parsing is tested against fixtures based on Micro Center's observed purchase-region wording. Website markup changes may require parser updates.
+**Micro Center may block automated browser access with a Cloudflare verification page.** This occurred during the initial deployment. The UI and worker correctly report **Blocked by Micro Center** and retry, but live successful inventory extraction could not be verified from that deployment. Cloudflare [does not support automated browsers for solving production challenges](https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/). Session reuse and bounded waits improve normal browsing reliability; they do not guarantee acceptance or solve a CAPTCHA. No fingerprint spoofing, proxy rotation, or CAPTCHA bypass is used. Open-box parsing is tested against fixtures based on Micro Center's observed purchase-region wording. Website markup changes may require parser updates.
 
 Real email delivery requires your own SMTP configuration and a successful test email. Automated SMTP tests use mocks.
 
@@ -116,7 +117,7 @@ Real email delivery requires your own SMTP configuration and a successful test e
 
 SQLite stores alerts, settings, and check history (the latest 100 events per alert). SMTP passwords are encrypted with a local Fernet key and never rendered back into the password field. The application user and machine administrators can decrypt them.
 
-Back up the entire data directory, including `secret.key`, together. That key also provides the stable browser-session signing secret. Runtime data, credentials, virtual environments, and logs are excluded from Git.
+Back up the entire data directory, including `secret.key`, together. That key also provides the stable browser-session signing secret. The private browser profile is also stored in the data directory. Runtime data, credentials, virtual environments, and logs are excluded from Git.
 
 ## Development and tests
 

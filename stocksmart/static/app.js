@@ -35,7 +35,7 @@ setInterval(async()=>{
     const response=await fetch(location.href,{headers:{'X-Requested-With':'StockSmart'}});
     if(!response.ok)return;
     const next=new DOMParser().parseFromString(await response.text(),'text/html');
-    for(const id of ['alert-list','stats']){
+    for(const id of ['alert-list','stats','retailer-notice']){
       const incoming=next.getElementById(id),current=document.getElementById(id);
       if(incoming&&current)current.replaceWith(incoming);
     }

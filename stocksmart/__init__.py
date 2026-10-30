@@ -50,7 +50,8 @@ def create_app(data_dir=None):
         return {'stores': sorted(STORES.items(), key=lambda item: item[1]), 'store_names': STORES,
                 'labels': LABELS, 'email_enabled': db.settings()['enabled'],
                 'worker_online': bool(heartbeat and time.time() - heartbeat['heartbeat'] < 180),
-                'csrf_token': session.get('csrf'), 'product_url': product_url}
+                'csrf_token': session.get('csrf'), 'product_url': product_url,
+                'retailer': db.retailer(), 'now': time.time()}
 
     @app.template_filter('timestamp')
     def timestamp(value):
@@ -133,8 +134,11 @@ def create_app(data_dir=None):
                 flash('Alert paused.' if alert['enabled'] else 'Alert resumed.', 'success')
             elif action == 'check':
                 # Respect a 60-second manual check cooldown and an in-flight check.
+                cooldown = conn.execute('SELECT blocked_until FROM retailer_state WHERE id=1').fetchone()
                 if not alert['enabled']:
                     flash('Resume this alert before checking it.', 'error')
+                elif cooldown['blocked_until'] > time.time():
+                    flash('Micro Center is in a shared cooldown. Your alert will retry when it ends; repeated manual checks will not bypass it.', 'info')
                 elif alert['status'] == 'checking' or (alert['last_checked'] and time.time() - alert['last_checked'] < 60):
                     flash('A check is running or just completed. Try again in a minute.', 'info')
                 else:
@@ -209,6 +213,7 @@ def create_app(data_dir=None):
     def health():
         with db.connect() as conn:
             heartbeat = conn.execute('SELECT heartbeat FROM worker_health WHERE id=1').fetchone()
-        return {'web': 'ok', 'worker': 'ok' if heartbeat and time.time() - heartbeat['heartbeat'] < 180 else 'offline'}
+        return {'web': 'ok', 'worker': 'ok' if heartbeat and time.time() - heartbeat['heartbeat'] < 180 else 'offline',
+                'retailer': 'cooldown' if db.retailer()['blocked_until'] > time.time() else 'ready'}
 
     return app

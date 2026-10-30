@@ -1,6 +1,7 @@
 """Conservative, store-specific parsing; blocked/unknown never means sold out."""
 import hashlib
 import re
+from pathlib import Path
 import time
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -53,9 +54,12 @@ class Inventory:
 def parse_inventory(html, store_id, open_box=False):
     soup = BeautifulSoup(html, 'html.parser')
     text = soup.get_text(' ', strip=True)
-    if re.search(r'just a moment|performing security verification|verify you are (?:a )?human|'
-                 r'checking your browser|access denied|cf-chl-',
-                 (soup.title.get_text() if soup.title else '') + ' ' + html[:6000], re.I):
+    # Cloudflare scripts can also occur on a normal product page. Inspect visible
+    # interstitial wording, not the mere presence of a script/"cf-chl" substring.
+    if (re.search(r'just a moment|access denied|attention required',
+                  soup.title.get_text() if soup.title else '', re.I)
+            or re.search(r'performing security verification|verify you are (?:a )?human|'
+                         r'checking your browser', text[:2000], re.I)):
         raise CheckFailure('Micro Center is requesting browser verification. No stock result was recorded.', 'blocked')
     heading = soup.find('h1')
     if not heading:
@@ -99,52 +103,100 @@ def parse_inventory(html, store_id, open_box=False):
 
 
 class BrowserChecker:
-    def __init__(self):
+    """One ordinary browser session, bounded waits, and a short per-product cache.
+
+    No fingerprint spoofing, proxy rotation, or challenge-solving automation.
+    Persistent browser data stays outside the repository in the private data dir.
+    """
+    def __init__(self, profile_dir=None, *, factory=None, clock=time.monotonic,
+                 sleep=time.sleep, wait_seconds=30):
         self.driver_path = None
+        self.browser = None
+        self.profile_dir = Path(profile_dir).resolve() if profile_dir else None
+        self.factory = factory
+        self.clock = clock
+        self.sleep = sleep
+        self.wait_seconds = wait_seconds
+        self.cache = {}
+        self.last_navigation = None
+
+    def close(self):
+        browser, self.browser = self.browser, None
+        if browser is not None:
+            try:
+                browser.quit()
+            except Exception:
+                pass
+
+    def _browser(self):
+        if self.browser is None:
+            if self.factory:
+                self.browser = self.factory()
+            else:
+                from selenium import webdriver
+                from selenium.webdriver.chrome.service import Service
+                from webdriver_manager.chrome import ChromeDriverManager
+                if self.driver_path is None:
+                    self.driver_path = ChromeDriverManager().install()
+                options = webdriver.ChromeOptions()
+                options.add_argument('--headless=new')
+                options.add_argument('--disable-dev-shm-usage')
+                if self.profile_dir:
+                    self.profile_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    self.profile_dir.chmod(0o700)
+                    options.add_argument('--user-data-dir=' + str(self.profile_dir))
+                self.browser = webdriver.Chrome(service=Service(self.driver_path), options=options)
+            self.browser.set_page_load_timeout(45)
+        return self.browser
 
     def check(self, alert):
-        from selenium import webdriver
         from selenium.common.exceptions import TimeoutException, WebDriverException
-        from selenium.webdriver.chrome.service import Service
-        from webdriver_manager.chrome import ChromeDriverManager
-        if self.driver_path is None:
-            self.driver_path = ChromeDriverManager().install()
-        options = webdriver.ChromeOptions()
-        options.add_argument('--headless=new')
-        options.add_argument('--disable-dev-shm-usage')
-        # Run as the unprivileged service user, with Chrome's sandbox enabled.
+        key = (alert['product_id'], alert['store_id'])
+        cached = self.cache.get(key)
+        if cached and self.clock() - cached[0] < 60:
+            return parse_inventory(cached[1], alert['store_id'], bool(alert['open_box']))
+        # A single serialized worker spaces distinct navigations, regardless of alert count.
+        if self.last_navigation is not None:
+            self.sleep(max(0, 15 - (self.clock() - self.last_navigation)))
         try:
-            with webdriver.Chrome(service=Service(self.driver_path), options=options) as browser:
-                browser.set_page_load_timeout(45)
-                browser.get('https://www.microcenter.com/?storeid=' + alert['store_id'])
-                if 'just a moment' in browser.title.lower():
-                    raise CheckFailure('Micro Center is requesting browser verification. Will retry automatically.', 'blocked')
-                browser.add_cookie({'name': 'storeSelected', 'value': alert['store_id'],
-                                    'domain': '.microcenter.com', 'path': '/', 'secure': True})
-                browser.get(product_url(alert['url'], alert['store_id'], bool(alert['open_box'])))
+            browser = self._browser()
+            self.last_navigation = self.clock()
+            # The query selects the store. Avoid a homepage request for every alert;
+            # the parser still requires the returned purchase region to name that store.
+            browser.get(product_url(alert['url'], alert['store_id'], bool(alert['open_box'])))
+            deadline = self.clock() + self.wait_seconds
+            openbox_ready_at = self.clock() + min(10, self.wait_seconds)
+            last_error = CheckFailure('The product inventory did not finish loading. Will retry.')
+            while True:
                 try:
                     _, actual_id = validate_url(browser.current_url)
-                except ValueError:
-                    raise CheckFailure('Micro Center redirected away from the product page. Will retry.')
-                if actual_id != alert['product_id']:
-                    raise CheckFailure('Micro Center returned a different product. Will retry.')
-                # Wait for the purchase region rather than assuming page load means inventory is ready.
-                deadline = time.monotonic() + 12
-                while time.monotonic() < deadline:
+                    if actual_id != alert['product_id']:
+                        raise CheckFailure('Micro Center returned a different product. Will retry.')
                     html = browser.page_source
-                    if re.search(r'just a moment|performing security verification', html, re.I):
-                        raise CheckFailure('Micro Center is requesting browser verification. Will retry automatically.', 'blocked')
-                    try:
-                        result = parse_inventory(html, alert['store_id'], bool(alert['open_box']))
-                        # Do not conclude absent open-box stock before delayed markup can load.
-                        if not alert['open_box'] or result.available or time.monotonic() > deadline - 2:
-                            return result
-                    except CheckFailure as exc:
-                        if exc.status == 'blocked':
-                            raise
-                    time.sleep(1)
-                return parse_inventory(browser.page_source, alert['store_id'], bool(alert['open_box']))
+                    result = parse_inventory(html, alert['store_id'], bool(alert['open_box']))
+                    # A new-stock result may share its HTML with an open-box alert.
+                    # Let delayed open-box markup settle before caching that page.
+                    if (alert['open_box'] and result.available) or self.clock() >= openbox_ready_at:
+                        self.cache[key] = (self.clock(), html)
+                        if len(self.cache) > 100:
+                            del self.cache[min(self.cache, key=lambda k: self.cache[k][0])]
+                        return result
+                except ValueError:
+                    last_error = CheckFailure('Micro Center redirected away from the product page. Will retry.')
+                except CheckFailure as exc:
+                    # A brief verification/loading interstitial may finish itself.
+                    # Wait for its actual outcome; never click a verification control.
+                    last_error = exc
+                if self.clock() >= deadline:
+                    if last_error.status == 'blocked':
+                        # Stop the interstitial's own timers/network activity during
+                        # the shared cooldown, keeping this profile's normal cookies.
+                        browser.get('about:blank')
+                    raise last_error
+                self.sleep(min(1, max(0, deadline - self.clock())))
         except TimeoutException:
+            self.close()
             raise CheckFailure('Micro Center timed out. Will retry automatically.', 'error')
         except WebDriverException:
-            raise CheckFailure('The inventory browser could not complete the check. Will retry.', 'error')
+            self.close()
+            raise CheckFailure('The inventory browser disconnected. It will restart on the next check.', 'error')
