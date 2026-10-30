@@ -113,7 +113,7 @@ Each unique `(product ID, store ID)` is fetched once per batch, even when new-st
 **HTTP only** is the default under Global settings and never launches a browser. **HTTP first** optionally renders a successful but incomplete HTML document. `403`, `429`, challenge headers/pages, and `Retry-After` pauses stop/defer the batch without trying alternate access paths. Server-provided `Retry-After` is honored even if it exceeds the normal cooldown cap.
 
 ## Current limitations
-- Verification-blocked checks pause all alerts. Repeated blocks back off for 15, 30, 60, 120, then at most 240 minutes. The cooldown survives worker restarts and manual checks cannot bypass it.
+- Verification-blocked checks pause all alerts. Repeated blocks back off for 15, 30, 60, 120, then at most 240 minutes. The cooldown survives worker restarts and manual checks respect it. The dashboard’s **Reset cooldown** button explicitly clears it when you want to retry; resetting alone does not queue a request or change the scheduled cadence.
 - Distinct HTTP requests are spaced by at least 15 seconds. Optional browser rendering uses a private profile and bounded page-load waits. No browser is started in HTTP-only mode.
 - Stock is parsed only from the primary product purchase region and must identify the selected store. Related products and other-store availability are excluded.
 - Blocked, timed-out, and unrecognized pages are reported separately from sold-out stock.

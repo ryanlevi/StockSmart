@@ -135,12 +135,12 @@ def create_app(data_dir=None):
                 flash('Alert paused.' if alert['enabled'] else 'Alert resumed.', 'success')
             elif action == 'check':
                 # Respect a 60-second manual check cooldown and an in-flight check.
-                cooldown = conn.execute('SELECT blocked_until FROM retailer_state WHERE id=1').fetchone()
+                cooldown = conn.execute('SELECT blocked_until,last_request FROM retailer_state WHERE id=1').fetchone()
                 if not alert['enabled']:
                     flash('Resume this alert before checking it.', 'error')
                 elif cooldown['blocked_until'] > time.time():
                     flash('Micro Center is in a shared cooldown. Your alert will retry when it ends; repeated manual checks will not bypass it.', 'info')
-                elif alert['status'] == 'checking' or (alert['last_checked'] and time.time() - alert['last_checked'] < 60):
+                elif alert['status'] == 'checking' or (alert['last_checked'] and time.time() - alert['last_checked'] < 60 and cooldown['last_request'] > 0):
                     flash('A check is running or just completed. Try again in a minute.', 'info')
                 else:
                     conn.execute("UPDATE alerts SET check_requested=1,request_reason='manual',status='pending' WHERE id=?", (alert_id,))
@@ -208,6 +208,12 @@ def create_app(data_dir=None):
                           'enabled': form.get('enabled') == 'on'}
                 return render_template('settings.html', settings=values), 400
         return render_template('settings.html', settings=values)
+
+    @app.post('/checks/reset-cooldown')
+    def reset_cooldown():
+        db.clear_cooldown()
+        flash('Cooldown cleared. No check was queued. Use Check now on the alert you want to test.', 'success')
+        return redirect(url_for('dashboard'))
 
     @app.get('/health')
     def health():

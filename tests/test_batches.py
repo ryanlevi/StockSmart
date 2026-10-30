@@ -339,5 +339,22 @@ class QueueWebTests(unittest.TestCase):
         self.assertEqual(self.db.settings()['transport'], 'auto')
 
 
+    def test_operator_reset_allows_manual_retry_without_changing_schedule_or_queuing(self):
+        self.post('/alerts/new', {'url': URL, 'store_id': '101'})
+        tick = next_tick(time.time(), 300)
+        with self.db.connect() as conn:
+            conn.execute('UPDATE batch_schedule SET next_run=? WHERE id=1', (tick,))
+            conn.execute("UPDATE alerts SET status='blocked',check_requested=0,last_checked=? WHERE id=1", (time.time(),))
+            conn.execute('UPDATE retailer_state SET blocked_until=?,last_request=?,block_streak=3 WHERE id=1', (time.time()+7200,time.time()))
+        self.assertEqual(self.client.post('/checks/reset-cooldown').status_code, 400)
+        self.assertEqual(self.post('/checks/reset-cooldown').status_code, 302)
+        self.assertEqual(self.db.retailer()['blocked_until'], 0)
+        self.assertEqual(self.db.retailer()['block_streak'], 0)
+        self.assertEqual(self.db.alert(1)['check_requested'], 0)
+        self.assertEqual(self.db.schedule()['next_run'], tick)
+        self.post('/alerts/1/check')
+        self.assertEqual(self.db.alert(1)['check_requested'], 1)
+
+
 if __name__ == '__main__':
     unittest.main()

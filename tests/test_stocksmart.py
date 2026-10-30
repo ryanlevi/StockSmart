@@ -241,6 +241,7 @@ class AppTests(unittest.TestCase):
         self.create()
         with self.db.connect() as conn:
             conn.execute("UPDATE alerts SET status='blocked',last_checked=?,next_check=? WHERE id=1", (time.time(), time.time()+900))
+            conn.execute('UPDATE retailer_state SET last_request=? WHERE id=1', (time.time(),))
         self.post('/alerts/1/check')
         self.assertEqual(self.db.alert(1)['status'], 'blocked')
 

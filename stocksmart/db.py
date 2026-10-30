@@ -150,6 +150,12 @@ class Database:
             row = conn.execute('SELECT * FROM batch_runs ORDER BY id DESC LIMIT 1').fetchone()
             return dict(row) if row else None
 
+    def clear_cooldown(self):
+        """Explicit operator override; does not issue or queue retailer requests."""
+        with self.connect() as conn:
+            conn.execute("UPDATE retailer_state SET blocked_until=0,block_streak=0,last_request=0,message='' WHERE id=1")
+            conn.execute("UPDATE alerts SET status='unknown',detail='Cooldown cleared. Use Check now or wait for the scheduled batch.',next_check=(SELECT next_run FROM batch_schedule WHERE id=1) WHERE enabled=1 AND status='blocked'")
+
     @staticmethod
     def event(conn, alert_id, status, message, now):
         conn.execute('INSERT INTO events(alert_id,created_at,status,message) VALUES (?,?,?,?)',
