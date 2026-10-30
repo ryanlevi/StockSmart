@@ -1,106 +1,146 @@
-# <span style="color: limegreen;">Micro Center Stock Application (MCSA) v1.0.1</span>
+# StockSmart
 
-###### <i>Licensed with Apache 2.0 - Check the <b>LICENSE</b> file in the main branch for more information</i>
+A self-hosted web dashboard for Micro Center stock alerts. Watch a product at a specific store, choose regular new stock or open-box inventory, and receive email when availability changes.
 
-Check the stock of a specific Micro Center product. Optionally, securely link your email to get notified when your selected product is in stock.
+This project is a fork of [ayoTyler/StockSmart](https://github.com/ayoTyler/StockSmart), originally created by [ayoTyler](https://github.com/ayoTyler) as the Micro Center Stock Application (MCSA). This fork adds the web UI, persistent alerts, store selection, open-box tracking, and background notification worker. The original `MCSA.py` is retained.
 
-## <span style="color: limegreen;">Installation</span>
+[Buy me a coffee](https://buymeacoffee.com/ryanlevi)
 
-<i>**Note: The default code looks for an AMD Ryzen 7 9800X3D at a Micro Center Store in Dallas, TX</i>
+![StockSmart dashboard](docs/dashboard.jpg)
 
+## Features
 
-<b>Step-by-step instructions for setting up the project:</b>
-    <br>
-1.  <b>Clone the repository:</b>
-    ```bash
-    git clone https://github.com/ayoTyler/Micro-Center-Stock-Application.git
-    ```
-    *Alternatively: If you choose to download the <b>.zip</b> from GitHub:<br>
-    1\. Extract the files to a folder using <i>7zip</i> or <i>WinRAR</i> <br>
-    2\. Open the <b>MCSA.py</b> application in a Python-supported IDE. (I recommend <i>PyCharm Community Edition</i>) <br>
-    <br>
-2.  <b>Open the command console/terminal window within your IDE. Change directory (cd) to the project folder's location (if needed) and run the following:</b>
-    ```bash
-    pip install -r requirements.txt
-    ```
-    *Alternatively: To use your system's command console/terminal window to install the items listed within the requirements folder:<br>
-    1\. Change directory (cd) to the project folder's location that contains <b>requirements.txt</b> <br>
-    2\. Run the above command<br>
-    <br>
-3.  <b>On Line 23 within the code, replace the Store Identification Number with your local Micro Center Store Identification Number:</b>
-    ```python
-    # Line 23
-    'value': 'store number here',
-    ```
-    <br>
-    <b>To find your local Micro Center Store Number:</b><br>
-    1. Make sure you have selected a store on www.microcenter.com<br>
-    2. Right-Click the page, choose 'Inspect'<br>
-    3. Click the double arrow (>>) at the top of the Inspect Element console and select 'Application'<br>
-    4. Under 'Storage', click 'Cookies'<br>
-    5. Under the 'Name' column, look for 'storeSelected' and find the appropriate value associated with that cookie.<br>
-    6. Replace the number on Line 23 in the code with the appropriate Store Identification Number as shown in the example below.<br>
-    
-    ```python
-    # Example
-    # Line 23
-    'value': '131',
-    ```
-    <br>
-4.  <b>On Line 30 within the code, replace the Product Page URL with your desired product:</b>
-    ```python
-    # Line 30 - Get the product page URL
-    driver.get("https://www.microcenter.com/your-product-url-here")
-    ```
-    <br>
-5.  <b><i>(Optional)</i> Adjust the speed that the program functions:</b>
-    <br>
-    <br>
-    Slower Internet = Higher Number (~30)
-    ```python
-    # Line 18 & Line 33 - Wait for the page to load, 
-    # adjust as needed (seconds)
-    time.sleep(30)
-    ```
-    
-    <br>
-    
-    Faster Internet = Lower Number (~5)
-    ```python
-    # Line 18 & Line 33 - Wait for the page to load, 
-    # adjust as needed (seconds)
-    time.sleep(5)
-    ```
-    
-    <br>
-    It is <u>NOT</u> recommended to set the number below 5.
-    <br>
-    <br>
-6.  <b><i>(Optional)</i> When you run the program, follow the instructions in the terminal/run console to securely connect your email to the application.</b><br>
-    <br>
-    When linked, this application sends you an alert email when your desired product is in stock. Otherwise, the program will run normally and notify you via the terminal/run console.<br>
-    <br>
-    <b>To securely link your email, follow the instructions in the terminal/run console or the instructions below:</b><br>
-    1\. Go to myaccount.google.com<br>
-    2\. Search 'App Passwords' and click the respective option<br>
-    3\. In the 'App name' field, enter any title specific to this program<br>
-    4\. Copy and paste the newly generated password into the appropriate fields given to you in the terminal/run console<br>
-    5\. Enter your email<br> 
-    6\. Enter your password<br>
-    7\. Expect to receive a test email from yourself confirming that your email is linked with the application<br>
+- Global email settings shared by every alert, with a test-email button.
+- A dropdown of 31 named Micro Center locations, including Tustin (`101`).
+- Product-link alerts for either regular new stock or open-box inventory.
+- Store-specific open-box counts, starting prices, and listing IDs when exposed by the product page.
+- Pause/resume, edit, delete, check-now, search, and check history.
+- Persistent SQLite storage and a background worker that runs while the browser is closed.
+- Duplicate-email suppression and retries after failed delivery.
+- Encrypted SMTP passwords on disk, CSRF-protected forms, and validated product URLs.
 
-<span style="color: limegreen;"><b><u>That's all!</u></span> Leave the program running in the background. If you shut down the computer, be sure to run through the steps again to get it working again. </b>
+## The flow
 
-### <span style="color: goldenrod;">Future Update Plans</span>
+1. Open the web UI and configure email under **Global settings**.
+2. Use **Save & send test email** to verify your configuration.
+3. Choose **Set up a new stock alert**.
+4. Select the store by name and paste a Micro Center product link.
+5. Check **Track open box** to watch open-box inventory only. Leave it unchecked for the regular new product.
+6. Select **Create stock alert**.
 
-1.  Show and email the amount in stock<br>
-2.  GUI window<br>
-3.  Multiple Micro Center stores listed - no code-changing required<br>
-4.  Works for other websites<br>
+The dropdown overrides any store ID embedded in the pasted link. Create separate alerts if you want to track both stock types for the same product and store.
 
+Store IDs come from the [official Micro Center store selector](https://www.microcenter.com/site/stores/default.aspx), checked October 30, 2026. Leading zeroes, such as Westmont (`025`), are preserved.
 
-### <span style="color: darkturquoise;">If this program helped you, buy me a coffee :)</span><br>
+## Requirements
 
-https://buymeacoffee.com/ayotyler     < - - - - - - - - - - - - - - - - - 
-<br>
-<br>
+- Python 3.12 (tested on Ubuntu 24.04).
+- Google Chrome and the Linux libraries it requires.
+- Git and Python virtual-environment support.
+- An SMTP mail server/account for email notifications.
+
+ChromeDriver is downloaded automatically by `webdriver-manager`; outbound access to its download service is required. Run the application and Chrome as an unprivileged user. Chrome's sandbox remains enabled.
+
+## Installation
+
+```bash
+git clone https://github.com/ryanlevi/StockSmart.git
+cd StockSmart
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-web.txt
+```
+
+Run the web UI and worker in separate terminals from the checkout, using the same data directory:
+
+```bash
+# Terminal 1: web UI
+export STOCKSMART_DATA="$PWD/data"
+waitress-serve --host=127.0.0.1 --port=8080 --call stocksmart:create_app
+```
+
+```bash
+# Terminal 2: polling and email worker
+source .venv/bin/activate
+export STOCKSMART_DATA="$PWD/data"
+python -m stocksmart.worker
+```
+
+Open [http://localhost:8080](http://localhost:8080). To serve your trusted LAN, bind to `0.0.0.0` and use the machine's LAN IP. This is a single-user application without a login screen; keep it on a trusted LAN or put it behind authenticated access before exposing it elsewhere.
+
+### Proxmox / systemd
+
+Run StockSmart inside an Ubuntu VM. Example starting resources: 2 vCPUs, 4 GB RAM, and a 40 GB disk. The VM needs Internet access for Micro Center, ChromeDriver downloads, and email delivery.
+
+Example service files are in [`deploy/`](deploy/). They assume the `ubuntu` user, a checkout at `/home/ubuntu/projects/StockSmart`, and runtime data at `/home/ubuntu/.local/share/stocksmart`. Adjust those paths and the user before installing if your setup differs.
+
+```bash
+sudo install -m 644 deploy/stocksmart-web.service /etc/systemd/system/
+sudo install -m 644 deploy/stocksmart-worker.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now stocksmart-web stocksmart-worker
+```
+
+The supplied web service listens on port `8080`. Both services start automatically with the VM.
+
+```bash
+sudo systemctl status stocksmart-web stocksmart-worker
+sudo systemctl restart stocksmart-web stocksmart-worker
+sudo journalctl -u stocksmart-worker -n 50
+curl http://127.0.0.1:8080/health
+```
+
+## Email configuration
+
+Email currently uses SMTP. For Gmail, use `smtp.gmail.com`, port `587`, STARTTLS, your email address as the SMTP username, and a Gmail app password. Enter sender and recipient addresses in **Global settings**. Other SMTP providers are supported through STARTTLS or SSL/TLS.
+
+Proxmox can act as a mail relay if its mail service is configured to accept mail from the VM and deliver it onward. Its notification settings do not automatically provide an SMTP relay for guests. The application does not configure or change the Proxmox host's mail service.
+
+A notification is sent when stock is first found and again after it becomes unavailable and returns. Open-box alerts also notify when the listing/count/price signature changes. Unchanged availability does not produce an email every polling cycle. Failed email deliveries retry on subsequent successful stock checks.
+
+## Polling and current limitations
+
+- The default check interval is five minutes, configurable globally.
+- Verification-blocked checks wait at least 15 minutes before retrying.
+- Stock is parsed only from the primary product purchase region and must identify the selected store. Related products and other-store availability are excluded.
+- Blocked, timed-out, and unrecognized pages are reported separately from sold-out stock.
+- Stock can sell out before an email arrives; an alert does not reserve inventory.
+
+**Micro Center may block automated browser access with a Cloudflare verification page.** This occurred during the initial deployment. The UI and worker correctly report **Blocked by Micro Center** and retry, but live successful inventory extraction could not be verified from that deployment. There is no CAPTCHA bypass. Open-box parsing is tested against fixtures based on Micro Center's observed purchase-region wording. Website markup changes may require parser updates.
+
+Real email delivery requires your own SMTP configuration and a successful test email. Automated SMTP tests use mocks.
+
+## Data and backups
+
+`STOCKSMART_DATA` defaults to `./data`. The web UI and worker must point to the same directory. Only one worker can run per directory.
+
+SQLite stores alerts, settings, and check history (the latest 100 events per alert). SMTP passwords are encrypted with a local Fernet key and never rendered back into the password field. The application user and machine administrators can decrypt them.
+
+Back up the entire data directory, including `secret.key`, together. That key also provides the stable browser-session signing secret. Runtime data, credentials, virtual environments, and logs are excluded from Git.
+
+## Development and tests
+
+```bash
+source .venv/bin/activate
+python -m unittest discover -s tests -v
+```
+
+Tests cover store mappings, regular/open-box separation, zero stock, listing changes, wrong-store responses, challenge pages, URL validation, alert CRUD, persistence, CSRF, encrypted settings, SMTP transports, duplicate suppression, and delivery retries.
+
+Keep the original repository available as an upstream remote:
+
+```bash
+git remote add upstream https://github.com/ayoTyler/StockSmart.git
+git fetch upstream
+```
+
+## Credits and license
+
+- Original StockSmart / Micro Center Stock Application: [ayoTyler](https://github.com/ayoTyler), [upstream repository](https://github.com/ayoTyler/StockSmart).
+- Web UI and open-box development: [ryanlevi/StockSmart](https://github.com/ryanlevi/StockSmart).
+- Licensed under [Apache License 2.0](LICENSE). The upstream license and copyright notice are preserved.
+- This project is independent of Micro Center and is not affiliated with or endorsed by Micro Center.
+
+## Support this fork
+
+If this project helps you find what you're looking for, you can [buy me a coffee](https://buymeacoffee.com/ryanlevi).

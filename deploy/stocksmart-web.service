@@ -1,0 +1,21 @@
+[Unit]
+Description=StockSmart web UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/projects/StockSmart
+Environment=STOCKSMART_DATA=/home/ubuntu/.local/share/stocksmart
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/projects/StockSmart/.venv/bin/waitress-serve --host=0.0.0.0 --port=8080 --threads=4 --call stocksmart:create_app
+Restart=on-failure
+RestartSec=5
+UMask=0077
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

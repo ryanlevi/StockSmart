@@ -1,0 +1,22 @@
+[Unit]
+Description=StockSmart inventory and notification worker
+After=network-online.target stocksmart-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/projects/StockSmart
+Environment=STOCKSMART_DATA=/home/ubuntu/.local/share/stocksmart
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/projects/StockSmart/.venv/bin/python -m stocksmart.worker
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=90
+UMask=0077
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
