@@ -16,7 +16,8 @@ This project is a fork of [ayoTyler/StockSmart](https://github.com/ayoTyler/Stoc
 - Store-specific open-box counts, starting prices, and listing IDs when exposed by the product page.
 - Pause/resume, edit, delete, check-now, search, and check history.
 - One global, clock-aligned schedule for all active alerts, with separate first/manual check requests.
-- One HTTP session per batch and one fetch per product/store, shared by both stock types.
+- One HTTP session per store in each batch and one fetch per product/store, shared by both stock types.
+- **Check in browser** opens the exact store-specific page and lets you record the result when Micro Center blocks the VM's automated request. Manual results are saved to history and can trigger the configured email alert.
 - HTTP-only operation by default; no browser dependencies or Chrome required.
 - Persistent SQLite storage and a background worker that runs while the UI is closed.
 - Duplicate-email suppression and retries after failed delivery.
@@ -104,11 +105,11 @@ A notification is sent when stock is first found and again after it becomes unav
 
 ## Batch scheduling and data sources
 
-The default interval is five minutes, configurable globally. Every active alert belongs to one scheduled batch at fixed clock boundaries (for example, `:00` / `:30` with a 30-minute interval). Requests are processed sequentially in that batch, not all fired concurrently at the retailer. Each batch owns one HTTP session; optional rendering shares one Chrome session only if needed. All clients are closed when the batch finishes.
+The default interval is five minutes, configurable globally. Every active alert belongs to one scheduled batch at fixed clock boundaries (for example, `:00` / `:30` with a 30-minute interval). A batch groups alerts by store and processes each store in its own HTTP/browser session, sequentially. Requests are not fired concurrently at the retailer. Distinct product-page requests keep a fixed minimum 15-second gap. All clients are closed when the batch finishes.
 
 First checks, edits, resumed alerts, and manual checks use a separate immediate queue. They do not move the shared schedule. New requests arriving during a batch wait for the next worker turn. After a restart, missed schedule ticks coalesce into one batch. A batch that overlaps later ticks skips them rather than repeatedly catching up. Changing the interval moves every alert to the next boundary together.
 
-Each unique `(product ID, store ID)` is fetched once per batch, even when new-stock and open-box alerts both exist. The dashboard shows the next scheduled batch and the last run's alert count, HTTP requests, and browser loads. Stored batch metadata retains the latest 100 runs.
+Each unique `(product ID, store ID)` is fetched once per batch, even when new-stock and open-box alerts both exist. The dashboard shows the next scheduled batch and the last run's alert count, HTTP requests, and browser loads. Stored batch metadata retains the latest 100 runs. **Check in browser** is an operator-assisted fallback: open the product page from the UI, read the selected store's count, and enter it in StockSmart. This records a manual observation; it does not make blocked scheduled requests work or alter the shared cooldown.
 
 **HTTP only** is the default under Global settings and never launches a browser. **HTTP first** optionally renders a successful but incomplete HTML document. `403`, `429`, challenge headers/pages, and `Retry-After` pauses stop/defer the batch without trying alternate access paths. Server-provided `Retry-After` is honored even if it exceeds the normal cooldown cap.
 

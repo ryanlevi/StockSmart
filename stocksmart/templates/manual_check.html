@@ -1,0 +1,20 @@
+{% extends 'base.html' %}
+{% block title %}Check in browser{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('dashboard') }}">{{ icon('back') }} Back to your watchlist</a>
+<div class="page-heading compact"><div><div class="eyebrow">LIVE BROWSER CHECK</div><h1>Check in browser<span class="title-dot">.</span></h1><p>{{ alert.title }} · {{ store_names[alert.store_id] }} · {{ 'Open box' if alert.open_box else 'New stock' }}</p></div></div>
+<div class="manual-check-layout">
+  <section class="panel">
+    <div class="manual-check-note"><strong>Use this when automated checks are blocked.</strong><span>Open the store-specific product page in your browser, read the stock count, then enter what Micro Center shows below. The result is saved to history and an availability email is sent if configured. This does not affect the scheduled checker.</span></div>
+    <a class="button primary open-product" href="{{ product_url(alert.url,alert.store_id,alert.open_box) }}" target="_blank" rel="noopener">{{ icon('external') }} Open product page · {{ store_names[alert.store_id] }}</a>
+    <form method="post" class="manual-result-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field"><label for="quantity">{{ 'Open-box quantity' if alert.open_box else 'New stock quantity' }}</label><input id="quantity" name="quantity" inputmode="numeric" pattern="[0-9]{1,4}\+?" maxlength="5" required value="{{ values.get('quantity','') }}" placeholder="0"><small>Enter 0 if the page shows none. For 25+, enter 25+.</small></div>
+      {% if alert.open_box %}<div class="field"><label for="price">Open-box price</label><input id="price" name="price" inputmode="decimal" value="{{ values.get('price','') }}" placeholder="199.96"><small>Optional. Enter the price shown beside the open-box offer.</small></div>{% endif %}
+      <p class="manual-result-warning">Saving a positive quantity updates the alert and may send the configured availability email.</p>
+      <div class="form-actions"><a class="button secondary" href="{{ url_for('dashboard') }}">Cancel</a><button class="button primary">Save browser result</button></div>
+    </form>
+  </section>
+  <aside class="manual-check-side"><h2>What the page showed</h2><p>For an open-box alert, use the separate “Open Box” count and price. The regular new-stock count does not count as open-box stock.</p><p>Example: enter <strong>1</strong> and <strong>199.96</strong> for “1 Open Box: from $199.96.”</p></aside>
+</div>
+{% endblock %}

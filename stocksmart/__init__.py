@@ -1,4 +1,5 @@
 import hmac
+import hashlib
 import re
 import secrets
 import sqlite3
@@ -8,8 +9,8 @@ from datetime import datetime, timezone
 from flask import Flask, abort, flash, redirect, render_template, request, session, url_for
 
 from .db import Database
-from .inventory import product_url, validate_url
-from .mail import mail_error, send_message
+from .inventory import Inventory, product_url, validate_url
+from .mail import mail_error, notify, send_message
 from .stores import STORES
 
 LABELS = {'pending': 'Waiting for first check', 'checking': 'Checking stock',
@@ -155,6 +156,75 @@ def create_app(data_dir=None):
         with db.connect() as conn:
             events = conn.execute('SELECT * FROM events WHERE alert_id=? ORDER BY id DESC LIMIT 50', (alert_id,)).fetchall()
         return render_template('history.html', alert=alert, events=events)
+
+    @app.route('/alerts/<int:alert_id>/manual-check', methods=['GET', 'POST'])
+    def manual_check(alert_id):
+        alert = require_alert(alert_id)
+        values = request.form if request.method == 'POST' else {}
+        if request.method == 'POST':
+            try:
+                if not alert['enabled']:
+                    raise ValueError('Resume this alert before recording a check.')
+                raw_quantity = values.get('quantity', '').strip()
+                if not re.fullmatch(r'\d{1,4}\+?', raw_quantity):
+                    raise ValueError('Enter the count shown on the product page, or 0 when none are listed.')
+                quantity = raw_quantity
+                count = int(quantity.rstrip('+'))
+                raw_price = values.get('price', '').strip()
+                if raw_price and not re.fullmatch(r'\$?\d{1,5}(?:,\d{3})*(?:\.\d{2})?', raw_price):
+                    raise ValueError('Enter the price shown, such as 199.96.')
+                price = '$' + raw_price.removeprefix('$').replace(',', '') if raw_price else None
+                if not alert['open_box']:
+                    price = None
+                if count == 0:
+                    price = None
+                available = count > 0
+                kind = 'open-box' if alert['open_box'] else 'new-stock'
+                store = STORES[alert['store_id']]
+                detail = (f'{quantity} open-box item(s) at {store}' + (f', from {price}.' if price else '.')
+                          if alert['open_box'] and available else
+                          f'{quantity} new item(s) in stock at {store}.' if available else
+                          f'No {kind.replace("-", " ")} available at {store} when checked in the browser.')
+                signature = (hashlib.sha256(f'{count}|{price}|[]'.encode()).hexdigest()
+                             if alert['open_box'] else 'new-in-stock')
+                result = Inventory(alert['title'], available, quantity, price, detail, signature, 'manual')
+                settings = db.settings()
+                now = time.time()
+                with db.connect() as conn:
+                    current = conn.execute('SELECT * FROM alerts WHERE id=? AND enabled=1', (alert_id,)).fetchone()
+                    if not current:
+                        raise ValueError('This alert is no longer active.')
+                    if count == 0:
+                        conn.execute('UPDATE alerts SET last_sent_signature=NULL,notification_error=NULL WHERE id=?', (alert_id,))
+                    conn.execute('UPDATE alerts SET status=?,detail=?,quantity=?,price=?,last_checked=?,last_transport=? WHERE id=?',
+                                 ('available' if available else 'unavailable', detail, quantity, price, now, 'manual', alert_id))
+                    db.event(conn, alert_id, 'available' if available else 'unavailable',
+                             'Manually checked in a browser. ' + detail, now)
+                    last_signature = current['last_sent_signature']
+                if available and last_signature != signature:
+                    if not settings['enabled']:
+                        with db.connect() as conn:
+                            conn.execute('UPDATE alerts SET notification_error=? WHERE id=?',
+                                         ('Stock found. Enable global email settings to receive notifications.', alert_id))
+                    else:
+                        try:
+                            notify(settings, alert, result)
+                        except Exception as exc:
+                            message = mail_error(exc)
+                            with db.connect() as conn:
+                                conn.execute('UPDATE alerts SET notification_error=? WHERE id=?', (message, alert_id))
+                                db.event(conn, alert_id, 'email_error', message, now)
+                        else:
+                            with db.connect() as conn:
+                                conn.execute('UPDATE alerts SET last_sent_signature=?,last_notified=?,notification_error=NULL WHERE id=?',
+                                             (signature, now, alert_id))
+                                db.event(conn, alert_id, 'notified', 'Stock alert email sent after a manual browser check.', now)
+                flash('Browser result saved to this alert’s history.', 'success')
+                return redirect(url_for('dashboard'))
+            except ValueError as exc:
+                flash(str(exc), 'error')
+                return render_template('manual_check.html', alert=alert, values=values), 400
+        return render_template('manual_check.html', alert=alert, values=values)
 
     @app.route('/settings', methods=['GET', 'POST'])
     def settings():

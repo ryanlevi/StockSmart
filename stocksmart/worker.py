@@ -99,43 +99,59 @@ def run_batch(db, factory=BatchChecker, sender=notify, clock=time.time, should_s
     batch = claim_batch(db, clock())
     if batch is None:
         return None
-    checker = None
     completed = 0
+    http_requests = 0
+    browser_requests = 0
     summary = 'Completed'
     processed = set()
+    last_request_started = None
+    by_store = {}
+    for alert in batch.alerts:
+        by_store.setdefault(alert['store_id'], []).append(alert)
     try:
-        checker = factory(db.directory / 'browser-profile', transport=db.settings()['transport'])
-        for alert in batch.alerts:
+        for store_id, alerts in by_store.items():
             if should_stop():
                 summary = 'Interrupted; remaining alerts queued'
                 break
             if db.retailer()['blocked_until'] > clock():
                 summary = 'Paused by retailer; remaining alerts deferred together'
                 break
-            if run_check(db, alert, checker, sender, clock, next_run=batch.next_run):
-                completed += 1
-            processed.add(alert['id'])
-        if db.retailer()['blocked_until'] > clock():
-            summary = 'Paused by retailer; remaining alerts deferred together'
+            # Keep each store's alerts in its own session/profile. Maintain the
+            # same fixed 15-second floor between navigations across store sessions.
+            if last_request_started is not None:
+                time.sleep(max(0, 15 - (clock() - last_request_started)))
+            checker = factory(db.directory / 'browser-profile' / store_id,
+                              transport=db.settings()['transport'])
+            try:
+                for alert in alerts:
+                    if should_stop():
+                        summary = 'Interrupted; remaining alerts queued'
+                        break
+                    if db.retailer()['blocked_until'] > clock():
+                        summary = 'Paused by retailer; remaining alerts deferred together'
+                        break
+                    if run_check(db, alert, checker, sender, clock, next_run=batch.next_run):
+                        completed += 1
+                    processed.add(alert['id'])
+                    last_request_started = db.retailer()['last_request']
+            finally:
+                http_requests += checker.http_requests
+                browser_requests += checker.browser_requests
+                checker.close()
+            if summary != 'Completed':
+                break
     except Exception:
         summary = 'Interrupted; remaining alerts queued'
         log.exception('Batch %s failed', batch.id)
     finally:
-        try:
-            if checker:
-                checker.close()
-        finally:
-            if summary.startswith('Interrupted'):
-                with db.connect() as conn:
-                    for alert in batch.alerts:
-                        if alert['id'] not in processed:
-                            conn.execute("UPDATE alerts SET check_requested=1,request_reason='recovery' WHERE id=? AND enabled=1", (alert['id'],))
-            finish_batch(db, batch, clock(), completed,
-                         checker.http_requests if checker else 0,
-                         checker.browser_requests if checker else 0, summary)
+        if summary.startswith('Interrupted'):
+            with db.connect() as conn:
+                for alert in batch.alerts:
+                    if alert['id'] not in processed:
+                        conn.execute("UPDATE alerts SET check_requested=1,request_reason='recovery' WHERE id=? AND enabled=1", (alert['id'],))
+        finish_batch(db, batch, clock(), completed, http_requests, browser_requests, summary)
     log.info('Batch %s (%s): %s/%s alerts; HTTP=%s browser=%s; %s', batch.id, batch.kind,
-             completed, len(batch.alerts), checker.http_requests if checker else 0,
-             checker.browser_requests if checker else 0, summary)
+             completed, len(batch.alerts), http_requests, browser_requests, summary)
     return batch
 
 
