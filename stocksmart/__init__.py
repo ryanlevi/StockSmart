@@ -139,7 +139,7 @@ def create_app(data_dir=None):
                 cooldown = conn.execute('SELECT blocked_until,last_request FROM retailer_state WHERE id=1').fetchone()
                 if not alert['enabled']:
                     flash('Resume this alert before checking it.', 'error')
-                elif cooldown['blocked_until'] > time.time():
+                elif db.settings()['transport'] != 'apify' and cooldown['blocked_until'] > time.time():
                     flash('Micro Center is in a shared cooldown. Your alert will retry when it ends; repeated manual checks will not bypass it.', 'info')
                 elif alert['status'] == 'checking' or (alert['last_checked'] and time.time() - alert['last_checked'] < 60 and cooldown['last_request'] > 0):
                     flash('A check is running or just completed. Try again in a minute.', 'info')
@@ -235,10 +235,12 @@ def create_app(data_dir=None):
                 try:
                     port = int(form.get('port', '587'))
                     interval = int(form.get('interval', '300'))
+                    apify_max_charge = float(form.get('apify_max_charge', values['apify_max_charge']))
                 except ValueError:
-                    raise ValueError('Choose a valid SMTP port and check interval.')
-                if not 1 <= port <= 65535 or interval not in {300, 600, 900, 1800, 3600}:
-                    raise ValueError('Choose a valid SMTP port and check interval.')
+                    raise ValueError('Choose a valid SMTP port, check interval, and Apify charge cap.')
+                if (not 1 <= port <= 65535 or interval not in {300, 600, 900, 1800, 3600}
+                        or not 0.01 <= apify_max_charge <= 5):
+                    raise ValueError('Choose a valid SMTP port, check interval, and Apify charge cap.')
                 security = form.get('security', '')
                 if security not in {'starttls', 'ssl'}:
                     raise ValueError('Choose STARTTLS or SSL/TLS for email encryption.')
@@ -253,14 +255,22 @@ def create_app(data_dir=None):
                 password = form.get('password') or values['password']
                 if form.get('clear_password') == 'on':
                     password = ''
+                apify_token = form.get('apify_token') or values['apify_token']
+                if form.get('clear_apify_token') == 'on':
+                    apify_token = ''
                 transport = form.get('transport', values['transport'])
-                if transport not in {'http', 'auto'}:
-                    raise ValueError('Choose an HTTP checking method.')
+                if transport not in {'http', 'auto', 'apify'}:
+                    raise ValueError('Choose an inventory data source.')
+                if transport == 'apify' and not apify_token:
+                    raise ValueError('Add an Apify API token to use the hosted Micro Center stock provider.')
                 candidate.update(enabled=form.get('enabled') == 'on', port=port, security=security,
-                                 interval=interval, password=password, transport=transport)
+                                 interval=interval, password=password, transport=transport,
+                                 apify_token=apify_token, apify_max_charge=apify_max_charge)
                 if candidate['enabled'] and not all(candidate[k] for k in ['host', 'sender', 'recipient']):
                     raise ValueError('Add the SMTP host, sender, and recipient to enable email.')
                 db.save_settings(candidate)
+                if transport == 'apify' and values['transport'] != 'apify':
+                    db.clear_cooldown()
                 if form.get('action') == 'test':
                     try:
                         send_message(candidate, 'StockSmart test email', 'Your global StockSmart email configuration is working.\nAll alerts use these settings.')
@@ -268,14 +278,16 @@ def create_app(data_dir=None):
                         flash('Settings saved. ' + mail_error(exc), 'error')
                     else:
                         flash('Settings saved. Test email sent.', 'success')
+                elif transport == 'apify':
+                    flash('Apify is saved as the inventory provider. Use Check now on one alert to run the first live batch.', 'success')
                 else:
                     flash('Global email settings saved.', 'success')
                 return redirect(url_for('settings'))
             except ValueError as exc:
                 flash(str(exc), 'error')
                 # Keep submitted non-secret values on validation errors.
-                values = {**values, **{k: form.get(k, '') for k in ['host', 'username', 'sender', 'recipient', 'port', 'security', 'interval', 'transport']},
-                          'enabled': form.get('enabled') == 'on'}
+                values = {**values, **{k: form.get(k, '') for k in ['host', 'username', 'sender', 'recipient', 'port', 'security', 'interval', 'transport', 'apify_max_charge']},
+                          'enabled': form.get('enabled') == 'on', 'apify_token': values['apify_token']}
                 return render_template('settings.html', settings=values), 400
         return render_template('settings.html', settings=values)
 

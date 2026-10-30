@@ -18,14 +18,12 @@
 <body>
 <aside class="sidebar">
 <a href="{{ url_for('dashboard') }}" class="brand"><span class="brand-mark"><i></i><i></i><i></i></span>StockSmart<span class="brand-dot">.</span></a>
-<div class="sidebar-caption">YOUR INVENTORY WATCH</div>
 <nav aria-label="Main navigation"><a href="{{ url_for('dashboard') }}" class="nav-link {{ 'selected' if request.endpoint != 'settings' }}">{{ icon('bell') }} Stock alerts</a><a href="{{ url_for('settings') }}" class="nav-link {{ 'selected' if request.endpoint == 'settings' }}">{{ icon('settings') }} Global settings</a></nav>
-<div class="sidebar-note">A good find is worth<br>keeping an eye on.</div>
 <div class="sidebar-bottom"><span class="connection"><span class="dot {{ 'green' if worker_online else 'amber' }}"></span>{{ 'Monitor online' if worker_online else 'Monitor offline' }}</span><span class="muted">Micro Center · Local instance</span></div>
 </aside>
-<div class="app-shell"><header class="topbar"><span class="breadcrumb">Workspace <span>/</span> {{ 'Global settings' if request.endpoint == 'settings' else 'Stock alerts' }}</span><a class="email-chip {{ 'configured' if email_enabled }}" href="{{ url_for('settings') }}">{{ icon('mail') }}{{ 'Email enabled' if email_enabled else 'Set up email' }}<span>↗</span></a></header>
+<div class="app-shell"><header class="topbar"><a class="email-chip {{ 'configured' if email_enabled }}" href="{{ url_for('settings') }}">{{ icon('mail') }}{{ 'Email enabled' if email_enabled else 'Set up email' }}<span>↗</span></a></header>
 <main>
 {% with messages = get_flashed_messages(with_categories=true) %}{% for category,message in messages %}<div class="flash {{ category }}" role="status">{{ message }}</div>{% endfor %}{% endwith %}
 {% block content %}{% endblock %}
-</main><footer class="page-footer"><span>StockSmart</span> Less refreshing. More finding.</footer></div>
+</main><footer class="page-footer"><span>StockSmart</span></footer></div>
 </body></html>

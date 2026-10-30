@@ -12,6 +12,7 @@ DEFAULT_SETTINGS = {
     'enabled': False, 'host': 'smtp.gmail.com', 'port': 587,
     'security': 'starttls', 'username': '', 'sender': '', 'recipient': '',
     'password': '', 'interval': 300, 'transport': 'http',
+    'apify_token': '', 'apify_max_charge': 0.10,
 }
 
 
@@ -111,14 +112,16 @@ class Database:
         result = dict(DEFAULT_SETTINGS)
         if row:
             result.update(json.loads(row['payload']))
-        if result['password']:
-            result['password'] = self.cipher.decrypt(result['password'].encode()).decode()
+        for secret in ('password', 'apify_token'):
+            if result[secret]:
+                result[secret] = self.cipher.decrypt(result[secret].encode()).decode()
         return result
 
     def save_settings(self, settings):
         payload = dict(settings)
-        if payload['password']:
-            payload['password'] = self.cipher.encrypt(payload['password'].encode()).decode()
+        for secret in ('password', 'apify_token'):
+            if payload[secret]:
+                payload[secret] = self.cipher.encrypt(payload[secret].encode()).decode()
         with self.connect() as conn:
             conn.execute('INSERT OR REPLACE INTO settings(id,payload) VALUES (1,?)', (json.dumps(payload),))
             schedule = conn.execute('SELECT interval FROM batch_schedule WHERE id=1').fetchone()

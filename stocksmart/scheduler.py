@@ -14,7 +14,7 @@ class Batch:
     next_run: float
 
 
-def claim_batch(db, now):
+def claim_batch(db, now, transport='http'):
     with db.connect() as conn:
         conn.execute('BEGIN IMMEDIATE')
         state = conn.execute('SELECT * FROM batch_schedule WHERE id=1').fetchone()
@@ -24,7 +24,7 @@ def claim_batch(db, now):
             conn.execute('UPDATE batch_schedule SET next_run=? WHERE id=1', (next_run,))
             conn.execute('UPDATE alerts SET next_check=? WHERE enabled=1', (next_run,))
         blocked = conn.execute('SELECT blocked_until,last_request FROM retailer_state WHERE id=1').fetchone()
-        if max(blocked['blocked_until'], blocked['last_request'] + 15) > now:
+        if transport != 'apify' and max(blocked['blocked_until'], blocked['last_request'] + 15) > now:
             return None
         scheduled = now >= next_run
         if scheduled:

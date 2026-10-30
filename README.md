@@ -17,8 +17,8 @@ This project is a fork of [ayoTyler/StockSmart](https://github.com/ayoTyler/Stoc
 - Pause/resume, edit, delete, check-now, search, and check history.
 - One global, clock-aligned schedule for all active alerts, with separate first/manual check requests.
 - One HTTP session per store in each batch and one fetch per product/store, shared by both stock types.
-- **Check in browser** opens the exact store-specific page and lets you record the result when Micro Center blocks the VM's automated request. Manual results are saved to history and can trigger the configured email alert.
-- HTTP-only operation by default; no browser dependencies or Chrome required.
+- Apify hosted inventory provider: one store-scoped Actor run per batch returns product and open-box inventory for all alerts at that store.
+- Direct HTTP remains available as a diagnostic source; the automated provider can be configured under Global settings.
 - Persistent SQLite storage and a background worker that runs while the UI is closed.
 - Duplicate-email suppression and retries after failed delivery.
 - Encrypted SMTP passwords on disk, CSRF-protected forms, and validated product URLs.
@@ -42,7 +42,9 @@ Store IDs come from the [official Micro Center store selector](https://www.micro
 - Git and Python virtual-environment support.
 - An SMTP mail server/account for email notifications.
 
-HTTP-only mode uses ordinary requests to Micro Center’s public product HTML and does not install or launch Selenium/Chrome. No supported public inventory API was verified during implementation. Generic shipping/JSON-LD availability is not used as a substitute for store-specific new/open-box stock.
+The Apify provider uses the community-maintained [Micro Center Product Scraper](https://apify.com/memo23/microcenter-product-scraper) Actor to retrieve store-specific inventory, including open-box listings. An Apify account and API token are required. The token is encrypted in the StockSmart data directory. The Actor is third-party software; confirm that its results and billing work for your account before relying on scheduled checks.
+
+Direct HTTP mode requests Micro Center’s public product pages and does not install or launch Selenium/Chrome. It is retained as a diagnostic option and may be blocked by Micro Center. Generic shipping/JSON-LD availability is not used as a substitute for store-specific new/open-box stock.
 
 For the optional **HTTP first — browser for incomplete HTML** mode, install Google Chrome and `pip install -r requirements-browser.txt`. ChromeDriver is downloaded automatically by `webdriver-manager`. Run Chrome as an unprivileged user; its sandbox remains enabled. Explicit HTTP denials, verification challenges, and rate limits never trigger browser escalation.
 
@@ -105,22 +107,22 @@ A notification is sent when stock is first found and again after it becomes unav
 
 ## Batch scheduling and data sources
 
-The default interval is five minutes, configurable globally. Every active alert belongs to one scheduled batch at fixed clock boundaries (for example, `:00` / `:30` with a 30-minute interval). A batch groups alerts by store and processes each store in its own HTTP/browser session, sequentially. Requests are not fired concurrently at the retailer. Distinct product-page requests keep a fixed minimum 15-second gap. All clients are closed when the batch finishes.
+The default interval is five minutes, configurable globally. Every active alert belongs to one scheduled batch at fixed clock boundaries (for example, `:00` / `:30` with a 30-minute interval). In Apify mode, StockSmart starts one Actor run per store and requests all unique products in that store together; new-stock and open-box alerts share the returned product data. Each store run has a configurable maximum charge (default $0.10), and the Apify account’s own usage limits also apply. Direct HTTP mode processes requests sequentially with a fixed minimum 15-second gap. All clients are closed when the batch finishes.
 
-First checks, edits, resumed alerts, and manual checks use a separate immediate queue. They do not move the shared schedule. New requests arriving during a batch wait for the next worker turn. After a restart, missed schedule ticks coalesce into one batch. A batch that overlaps later ticks skips them rather than repeatedly catching up. Changing the interval moves every alert to the next boundary together.
+First checks, edits, resumed alerts, and Check now requests use a separate immediate queue. They do not move the shared schedule. New requests arriving during a batch wait for the next worker turn. After a restart, missed schedule ticks coalesce into one batch. A batch that overlaps later ticks skips them rather than repeatedly catching up. Changing the interval moves every alert to the next boundary together.
 
-Each unique `(product ID, store ID)` is fetched once per batch, even when new-stock and open-box alerts both exist. The dashboard shows the next scheduled batch and the last run's alert count, HTTP requests, and browser loads. Stored batch metadata retains the latest 100 runs. **Check in browser** is an operator-assisted fallback: open the product page from the UI, read the selected store's count, and enter it in StockSmart. This records a manual observation; it does not make blocked scheduled requests work or alter the shared cooldown.
+Each unique `(product ID, store ID)` is fetched once per store batch, even when new-stock and open-box alerts both exist. The dashboard shows the next scheduled batch and the last run's alert count, HTTP requests, and browser loads. Stored batch metadata retains the latest 100 runs.
 
-**HTTP only** is the default under Global settings and never launches a browser. **HTTP first** optionally renders a successful but incomplete HTML document. `403`, `429`, challenge headers/pages, and `Retry-After` pauses stop/defer the batch without trying alternate access paths. Server-provided `Retry-After` is honored even if it exceeds the normal cooldown cap.
+Choose **Apify hosted Micro Center stock provider** under Global settings, enter an Apify API token, and set the per-store run charge cap to enable hosted checks. Use **Check now** on one alert to request a first run immediately; scheduled batches then check all active alerts. Apify errors appear on the alert and retry on a later batch. **Direct HTTP** is available for diagnostics and never launches a browser. `403`, `429`, challenge headers/pages, and `Retry-After` pause or defer direct requests without trying alternate access paths.
 
 ## Current limitations
-- Verification-blocked checks pause all alerts. Repeated blocks back off for 15, 30, 60, 120, then at most 240 minutes. The cooldown survives worker restarts and manual checks respect it. The dashboard’s **Reset cooldown** button explicitly clears it when you want to retry; resetting alone does not queue a request or change the scheduled cadence.
-- Distinct HTTP requests are spaced by at least 15 seconds. Optional browser rendering uses a private profile and bounded page-load waits. No browser is started in HTTP-only mode.
+- Direct HTTP verification blocks pause those checks. Repeated blocks back off for 15, 30, 60, 120, then at most 240 minutes. The cooldown survives worker restarts; the dashboard’s **Reset cooldown** button clears it without queuing a request or changing the schedule.
+- The hosted Actor, its extraction logic, availability, and pricing are controlled by Apify and its publisher. StockSmart caps each store run, but actual results and charges should be confirmed in the Apify account.
 - Stock is parsed only from the primary product purchase region and must identify the selected store. Related products and other-store availability are excluded.
 - Blocked, timed-out, and unrecognized pages are reported separately from sold-out stock.
 - Stock can sell out before an email arrives; an alert does not reserve inventory.
 
-**Micro Center may block automated browser access with a Cloudflare verification page.** This occurred during deployment, including an HTTP probe returning `403` with `cf-mitigated: challenge`. The UI and worker report **Blocked by Micro Center** and preserve the shared cooldown. Switching to HTTP does not remove this retailer-side restriction; live successful inventory extraction could not be verified from the deployment. Cloudflare [does not support automated browsers for solving production challenges](https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/). Session reuse and bounded waits improve normal browsing reliability; they do not guarantee acceptance or solve a CAPTCHA. No fingerprint spoofing, proxy rotation, or CAPTCHA bypass is used. Open-box parsing is tested against fixtures based on Micro Center's observed purchase-region wording. Website markup changes may require parser updates.
+**The Apify provider has not yet been validated with the owner’s account.** It depends on the community Actor remaining available and returning correct store-specific product and open-box data. The previous direct HTTP checker was blocked by Micro Center; using Direct HTTP does not remove that restriction.
 
 Real email delivery requires your own SMTP configuration and a successful test email. Automated SMTP tests use mocks.
 
@@ -128,7 +130,7 @@ Real email delivery requires your own SMTP configuration and a successful test e
 
 `STOCKSMART_DATA` defaults to `./data`. The web UI and worker must point to the same directory. Only one worker can run per directory.
 
-SQLite stores alerts, settings, and check history (the latest 100 events per alert). SMTP passwords are encrypted with a local Fernet key and never rendered back into the password field. The application user and machine administrators can decrypt them.
+SQLite stores alerts, settings, and check history (the latest 100 events per alert). SMTP passwords and the Apify API token are encrypted with a local Fernet key and never rendered back into their password fields. The application user and machine administrators can decrypt them.
 
 Back up the entire data directory, including `secret.key`, together. That key also provides the stable browser-session signing secret. The private browser profile is also stored in the data directory. Runtime data, credentials, virtual environments, and logs are excluded from Git.
 

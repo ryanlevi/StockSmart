@@ -8,25 +8,28 @@ from .inventory import CheckFailure
 from .mail import mail_error, notify
 from .scheduler import claim_batch, finish_batch
 from .sources import BatchChecker
+from .apify_source import ApifyStoreChecker
 
 log = logging.getLogger(__name__)
 
 
 def run_check(db, alert, checker, sender=notify, clock=time.time, next_run=None):
     now = clock()
+    transport = db.settings()['transport']
     with db.connect() as conn:
         current = conn.execute('SELECT * FROM alerts WHERE id=? AND enabled=1', (alert['id'],)).fetchone()
         if not current:
             return
         state = conn.execute('SELECT * FROM retailer_state WHERE id=1').fetchone()
-        if state['blocked_until'] > now:
+        if transport != 'apify' and state['blocked_until'] > now:
             conn.execute("UPDATE alerts SET status='blocked',detail=?,next_check=MAX(next_check,?) WHERE id=?",
                          (state['message'], state['blocked_until'], alert['id']))
             return
         # Re-read current configuration after a queued alert may have been edited.
         alert = dict(current)
         conn.execute("UPDATE alerts SET status='checking' WHERE id=?", (alert['id'],))
-        conn.execute('UPDATE retailer_state SET last_request=? WHERE id=1', (now,))
+        if transport != 'apify':
+            conn.execute('UPDATE retailer_state SET last_request=? WHERE id=1', (now,))
         conn.execute('INSERT OR REPLACE INTO worker_health(id,heartbeat) VALUES(1,?)', (now,))
     try:
         result = checker.check(alert)
@@ -60,7 +63,8 @@ def run_check(db, alert, checker, sender=notify, clock=time.time, next_run=None)
     settings = db.settings()
     status = 'available' if result.available else 'unavailable'
     with db.connect() as conn:
-        conn.execute("UPDATE retailer_state SET blocked_until=0,block_streak=0,message='' WHERE id=1")
+        if settings['transport'] != 'apify':
+            conn.execute("UPDATE retailer_state SET blocked_until=0,block_streak=0,message='' WHERE id=1")
         # UI may have deleted or paused the alert while Chrome was checking.
         current = conn.execute('SELECT * FROM alerts WHERE id=? AND enabled=1', (alert['id'],)).fetchone()
         if not current:
@@ -96,7 +100,7 @@ def run_check(db, alert, checker, sender=notify, clock=time.time, next_run=None)
 
 
 def run_batch(db, factory=BatchChecker, sender=notify, clock=time.time, should_stop=lambda: False):
-    batch = claim_batch(db, clock())
+    batch = claim_batch(db, clock(), transport=db.settings()['transport'])
     if batch is None:
         return None
     completed = 0
@@ -104,7 +108,6 @@ def run_batch(db, factory=BatchChecker, sender=notify, clock=time.time, should_s
     browser_requests = 0
     summary = 'Completed'
     processed = set()
-    last_request_started = None
     by_store = {}
     for alert in batch.alerts:
         by_store.setdefault(alert['store_id'], []).append(alert)
@@ -113,27 +116,31 @@ def run_batch(db, factory=BatchChecker, sender=notify, clock=time.time, should_s
             if should_stop():
                 summary = 'Interrupted; remaining alerts queued'
                 break
-            if db.retailer()['blocked_until'] > clock():
+            transport = db.settings()['transport']
+            if transport != 'apify' and db.retailer()['blocked_until'] > clock():
                 summary = 'Paused by retailer; remaining alerts deferred together'
                 break
-            # Keep each store's alerts in its own session/profile. Maintain the
-            # same fixed 15-second floor between navigations across store sessions.
-            if last_request_started is not None:
-                time.sleep(max(0, 15 - (clock() - last_request_started)))
-            checker = factory(db.directory / 'browser-profile' / store_id,
-                              transport=db.settings()['transport'])
+            if transport == 'apify':
+                settings = db.settings()
+                checker = ApifyStoreChecker(settings['apify_token'], settings['apify_max_charge'])
+                checker.prepare(alerts)
+            else:
+                # Direct requests stay paced across store sessions.
+                last_request = db.retailer()['last_request']
+                if last_request:
+                    time.sleep(max(0, 15 - (clock() - last_request)))
+                checker = factory(db.directory / 'browser-profile' / store_id, transport=transport)
             try:
                 for alert in alerts:
                     if should_stop():
                         summary = 'Interrupted; remaining alerts queued'
                         break
-                    if db.retailer()['blocked_until'] > clock():
+                    if transport != 'apify' and db.retailer()['blocked_until'] > clock():
                         summary = 'Paused by retailer; remaining alerts deferred together'
                         break
                     if run_check(db, alert, checker, sender, clock, next_run=batch.next_run):
                         completed += 1
                     processed.add(alert['id'])
-                    last_request_started = db.retailer()['last_request']
             finally:
                 http_requests += checker.http_requests
                 browser_requests += checker.browser_requests
