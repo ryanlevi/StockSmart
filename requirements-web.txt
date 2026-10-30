@@ -1,5 +1,2 @@
+# Compatibility entry point for existing web deployments.
 -r requirements.txt
-Flask>=3.1,<4
-waitress>=3.0,<4
-beautifulsoup4>=4.12,<5
-cryptography>=44

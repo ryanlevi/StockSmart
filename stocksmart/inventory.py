@@ -12,9 +12,10 @@ from .stores import STORES, store_city
 
 
 class CheckFailure(Exception):
-    def __init__(self, message, status='unknown'):
+    def __init__(self, message, status='unknown', retry_after=0):
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
 
 
 def validate_url(raw):
@@ -49,6 +50,7 @@ class Inventory:
     price: str | None
     detail: str
     signature: str
+    transport: str = 'browser'
 
 
 def parse_inventory(html, store_id, open_box=False):
@@ -119,6 +121,8 @@ class BrowserChecker:
         self.wait_seconds = wait_seconds
         self.cache = {}
         self.last_navigation = None
+        self.cache_ttl = 60
+        self.browser_requests = 0
 
     def close(self):
         browser, self.browser = self.browser, None
@@ -153,7 +157,7 @@ class BrowserChecker:
         from selenium.common.exceptions import TimeoutException, WebDriverException
         key = (alert['product_id'], alert['store_id'])
         cached = self.cache.get(key)
-        if cached and self.clock() - cached[0] < 60:
+        if cached and self.clock() - cached[0] < self.cache_ttl:
             return parse_inventory(cached[1], alert['store_id'], bool(alert['open_box']))
         # A single serialized worker spaces distinct navigations, regardless of alert count.
         if self.last_navigation is not None:
@@ -161,6 +165,7 @@ class BrowserChecker:
         try:
             browser = self._browser()
             self.last_navigation = self.clock()
+            self.browser_requests += 1
             # The query selects the store. Avoid a homepage request for every alert;
             # the parser still requires the returned purchase region to name that store.
             browser.get(product_url(alert['url'], alert['store_id'], bool(alert['open_box'])))

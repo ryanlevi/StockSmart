@@ -51,7 +51,8 @@ def create_app(data_dir=None):
                 'labels': LABELS, 'email_enabled': db.settings()['enabled'],
                 'worker_online': bool(heartbeat and time.time() - heartbeat['heartbeat'] < 180),
                 'csrf_token': session.get('csrf'), 'product_url': product_url,
-                'retailer': db.retailer(), 'now': time.time()}
+                'retailer': db.retailer(), 'now': time.time(), 'schedule': db.schedule(),
+                'last_batch': db.latest_batch(), 'transport': db.settings()['transport']}
 
     @app.template_filter('timestamp')
     def timestamp(value):
@@ -95,12 +96,12 @@ def create_app(data_dir=None):
                 if previous:
                     if previous['status'] == 'checking':
                         raise ValueError('A check is in progress. Try editing again after it finishes.')
-                    changed = conn.execute("UPDATE alerts SET url=?,product_id=?,title=?,store_id=?,open_box=?,status=?,detail=?,quantity=NULL,price=NULL,next_check=0,last_checked=NULL,last_sent_signature=NULL,notification_error=NULL WHERE id=? AND status!='checking'",
+                    changed = conn.execute("UPDATE alerts SET url=?,product_id=?,title=?,store_id=?,open_box=?,status=?,detail=?,quantity=NULL,price=NULL,next_check=0,last_checked=NULL,last_sent_signature=NULL,notification_error=NULL,check_requested=1,request_reason='edited',last_transport=NULL WHERE id=? AND status!='checking'",
                                  (clean, product_id, title, store_id, open_box, 'pending', 'Waiting for the next check.', alert_id))
                     if changed.rowcount != 1:
                         raise ValueError('A check is in progress. Try editing again after it finishes.')
                 else:
-                    conn.execute('INSERT INTO alerts(url,product_id,title,store_id,open_box,created_at) VALUES(?,?,?,?,?,?)',
+                    conn.execute('INSERT INTO alerts(url,product_id,title,store_id,open_box,created_at,check_requested) VALUES(?,?,?,?,?,?,1)',
                                  (clean, product_id, title, store_id, open_box, time.time()))
             flash('Alert updated.' if previous else 'Alert created. The first stock check is queued.', 'success')
             return redirect(url_for('dashboard'))
@@ -130,7 +131,7 @@ def create_app(data_dir=None):
                 conn.execute('DELETE FROM alerts WHERE id=?', (alert_id,))
                 flash('Alert deleted.', 'success')
             elif action == 'toggle':
-                conn.execute('UPDATE alerts SET enabled=?,next_check=0 WHERE id=?', (int(not alert['enabled']), alert_id))
+                conn.execute("UPDATE alerts SET enabled=?,check_requested=?,request_reason='resumed' WHERE id=?", (int(not alert['enabled']), int(not alert['enabled']), alert_id))
                 flash('Alert paused.' if alert['enabled'] else 'Alert resumed.', 'success')
             elif action == 'check':
                 # Respect a 60-second manual check cooldown and an in-flight check.
@@ -142,7 +143,7 @@ def create_app(data_dir=None):
                 elif alert['status'] == 'checking' or (alert['last_checked'] and time.time() - alert['last_checked'] < 60):
                     flash('A check is running or just completed. Try again in a minute.', 'info')
                 else:
-                    conn.execute("UPDATE alerts SET next_check=0,status='pending' WHERE id=?", (alert_id,))
+                    conn.execute("UPDATE alerts SET check_requested=1,request_reason='manual',status='pending' WHERE id=?", (alert_id,))
                     flash('Stock check queued.', 'success')
             else:
                 abort(404)
@@ -182,15 +183,14 @@ def create_app(data_dir=None):
                 password = form.get('password') or values['password']
                 if form.get('clear_password') == 'on':
                     password = ''
+                transport = form.get('transport', values['transport'])
+                if transport not in {'http', 'auto'}:
+                    raise ValueError('Choose an HTTP checking method.')
                 candidate.update(enabled=form.get('enabled') == 'on', port=port, security=security,
-                                 interval=interval, password=password)
+                                 interval=interval, password=password, transport=transport)
                 if candidate['enabled'] and not all(candidate[k] for k in ['host', 'sender', 'recipient']):
                     raise ValueError('Add the SMTP host, sender, and recipient to enable email.')
                 db.save_settings(candidate)
-                # Apply interval changes without resetting notification deduplication.
-                if interval != values['interval']:
-                    with db.connect() as conn:
-                        conn.execute('UPDATE alerts SET next_check=MIN(next_check,?) WHERE enabled=1', (time.time() + interval,))
                 if form.get('action') == 'test':
                     try:
                         send_message(candidate, 'StockSmart test email', 'Your global StockSmart email configuration is working.\nAll alerts use these settings.')
@@ -204,7 +204,7 @@ def create_app(data_dir=None):
             except ValueError as exc:
                 flash(str(exc), 'error')
                 # Keep submitted non-secret values on validation errors.
-                values = {**values, **{k: form.get(k, '') for k in ['host', 'username', 'sender', 'recipient', 'port', 'security', 'interval']},
+                values = {**values, **{k: form.get(k, '') for k in ['host', 'username', 'sender', 'recipient', 'port', 'security', 'interval', 'transport']},
                           'enabled': form.get('enabled') == 'on'}
                 return render_template('settings.html', settings=values), 400
         return render_template('settings.html', settings=values)
@@ -214,6 +214,7 @@ def create_app(data_dir=None):
         with db.connect() as conn:
             heartbeat = conn.execute('SELECT heartbeat FROM worker_health WHERE id=1').fetchone()
         return {'web': 'ok', 'worker': 'ok' if heartbeat and time.time() - heartbeat['heartbeat'] < 180 else 'offline',
-                'retailer': 'cooldown' if db.retailer()['blocked_until'] > time.time() else 'ready'}
+                'retailer': 'cooldown' if db.retailer()['blocked_until'] > time.time() else 'ready',
+                'next_scheduled_batch': db.schedule()['next_run'], 'last_batch': db.latest_batch()}
 
     return app

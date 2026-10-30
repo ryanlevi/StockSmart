@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from cryptography.fernet import Fernet
 DEFAULT_SETTINGS = {
     'enabled': False, 'host': 'smtp.gmail.com', 'port': 587,
     'security': 'starttls', 'username': '', 'sender': '', 'recipient': '',
-    'password': '', 'interval': 300,
+    'password': '', 'interval': 300, 'transport': 'http',
 }
 
 
@@ -65,7 +66,32 @@ class Database:
                     message TEXT NOT NULL DEFAULT ''
                 );
                 INSERT OR IGNORE INTO retailer_state(id) VALUES(1);
+                CREATE TABLE IF NOT EXISTS batch_schedule (
+                    id INTEGER PRIMARY KEY CHECK(id=1), interval INTEGER NOT NULL DEFAULT 300,
+                    next_run REAL NOT NULL DEFAULT 0
+                );
+                INSERT OR IGNORE INTO batch_schedule(id) VALUES(1);
+                CREATE TABLE IF NOT EXISTS batch_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
+                    started_at REAL NOT NULL, finished_at REAL, alert_count INTEGER NOT NULL,
+                    completed INTEGER NOT NULL DEFAULT 0, http_requests INTEGER NOT NULL DEFAULT 0,
+                    browser_requests INTEGER NOT NULL DEFAULT 0, summary TEXT NOT NULL DEFAULT 'Running'
+                );
             ''')
+            conn.execute('BEGIN IMMEDIATE')
+            columns = {row['name'] for row in conn.execute('PRAGMA table_info(alerts)')}
+            for name, definition in {
+                'check_requested': 'INTEGER NOT NULL DEFAULT 0',
+                'request_reason': "TEXT NOT NULL DEFAULT 'first'",
+                'last_transport': 'TEXT', 'last_batch_id': 'INTEGER',
+            }.items():
+                if name not in columns:
+                    conn.execute(f'ALTER TABLE alerts ADD COLUMN {name} {definition}')
+            if 'check_requested' not in columns:
+                conn.execute("UPDATE alerts SET check_requested=1 WHERE last_checked IS NULL OR status='pending'")
+            settings = conn.execute('SELECT payload FROM settings WHERE id=1').fetchone()
+            interval = json.loads(settings['payload']).get('interval', 300) if settings else 300
+            conn.execute('UPDATE batch_schedule SET interval=? WHERE next_run=0', (interval,))
         self.path.chmod(0o600)
 
     @contextmanager
@@ -95,6 +121,12 @@ class Database:
             payload['password'] = self.cipher.encrypt(payload['password'].encode()).decode()
         with self.connect() as conn:
             conn.execute('INSERT OR REPLACE INTO settings(id,payload) VALUES (1,?)', (json.dumps(payload),))
+            schedule = conn.execute('SELECT interval FROM batch_schedule WHERE id=1').fetchone()
+            if schedule['interval'] != payload['interval']:
+                interval = payload['interval']
+                next_run = (int(time.time()) // interval + 1) * interval
+                conn.execute('UPDATE batch_schedule SET interval=?,next_run=? WHERE id=1', (interval, next_run))
+                conn.execute('UPDATE alerts SET next_check=? WHERE enabled=1', (next_run,))
 
     def alerts(self):
         with self.connect() as conn:
@@ -108,6 +140,15 @@ class Database:
     def retailer(self):
         with self.connect() as conn:
             return dict(conn.execute('SELECT * FROM retailer_state WHERE id=1').fetchone())
+
+    def schedule(self):
+        with self.connect() as conn:
+            return dict(conn.execute('SELECT * FROM batch_schedule WHERE id=1').fetchone())
+
+    def latest_batch(self):
+        with self.connect() as conn:
+            row = conn.execute('SELECT * FROM batch_runs ORDER BY id DESC LIMIT 1').fetchone()
+            return dict(row) if row else None
 
     @staticmethod
     def event(conn, alert_id, status, message, now):

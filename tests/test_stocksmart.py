@@ -396,7 +396,7 @@ class CooldownTests(unittest.TestCase):
         self.assertEqual(reopened.retailer()['block_streak'], 1)
         self.assertEqual(reopened.alert(2)['status'], 'blocked')
         self.assertIsNone(reopened.alert(2)['last_checked'])
-        self.assertIn(b'Micro Center is requesting verification', self.client.get('/').data)
+        self.assertIn(b'Micro Center checks are paused', self.client.get('/').data)
         self.post('/alerts/2/check')
         self.assertGreater(self.db.alert(2)['next_check'], now[0])
 

@@ -4,13 +4,15 @@ import signal
 import time
 
 from .db import Database
-from .inventory import BrowserChecker, CheckFailure
+from .inventory import CheckFailure
 from .mail import mail_error, notify
+from .scheduler import claim_batch, finish_batch
+from .sources import BatchChecker
 
 log = logging.getLogger(__name__)
 
 
-def run_check(db, alert, checker, sender=notify, clock=time.time):
+def run_check(db, alert, checker, sender=notify, clock=time.time, next_run=None):
     now = clock()
     with db.connect() as conn:
         current = conn.execute('SELECT * FROM alerts WHERE id=? AND enabled=1', (alert['id'],)).fetchone()
@@ -25,6 +27,7 @@ def run_check(db, alert, checker, sender=notify, clock=time.time):
         alert = dict(current)
         conn.execute("UPDATE alerts SET status='checking' WHERE id=?", (alert['id'],))
         conn.execute('UPDATE retailer_state SET last_request=? WHERE id=1', (now,))
+        conn.execute('INSERT OR REPLACE INTO worker_health(id,heartbeat) VALUES(1,?)', (now,))
     try:
         result = checker.check(alert)
     except Exception as exc:
@@ -40,9 +43,8 @@ def run_check(db, alert, checker, sender=notify, clock=time.time):
             if status == 'blocked':
                 state = conn.execute('SELECT block_streak FROM retailer_state WHERE id=1').fetchone()
                 streak = state['block_streak'] + 1
-                delay = max(interval, min(900 * 2 ** min(streak - 1, 4), 14400))
-                message = ('Micro Center requires browser verification. All alerts are cooling down '
-                           f'for {delay // 60} minutes; no stock result was recorded.')
+                delay = max(interval, min(900 * 2 ** min(streak - 1, 4), 14400), getattr(exc, 'retry_after', 0))
+                message = f'{message} All alerts are cooling down for {int(delay // 60)} minutes; no stock result was recorded.'
                 conn.execute('UPDATE retailer_state SET blocked_until=?,block_streak=?,message=? WHERE id=1',
                              (now + delay, streak, message))
                 # A block affects this retailer/session, not one product. Do not
@@ -50,10 +52,10 @@ def run_check(db, alert, checker, sender=notify, clock=time.time):
                 conn.execute("UPDATE alerts SET status='blocked',detail=?,next_check=MAX(next_check,?) WHERE enabled=1",
                              (message, now + delay))
             conn.execute('UPDATE alerts SET status=?,detail=?,last_checked=?,next_check=? WHERE id=? AND enabled=1',
-                         (status, message, now, now + delay, alert['id']))
+                         (status, message, now, now + delay if status == 'blocked' or next_run is None else db.schedule()['next_run'], alert['id']))
             if conn.execute('SELECT 1 FROM alerts WHERE id=?', (alert['id'],)).fetchone():
                 db.event(conn, alert['id'], status, message, now)
-        return
+        return True
     now = clock()
     settings = db.settings()
     status = 'available' if result.available else 'unavailable'
@@ -63,9 +65,10 @@ def run_check(db, alert, checker, sender=notify, clock=time.time):
         current = conn.execute('SELECT * FROM alerts WHERE id=? AND enabled=1', (alert['id'],)).fetchone()
         if not current:
             return
-        conn.execute('UPDATE alerts SET title=?,status=?,detail=?,quantity=?,price=?,last_checked=?,next_check=? WHERE id=?',
+        following = db.schedule()['next_run'] if next_run is not None else now + settings['interval']
+        conn.execute('UPDATE alerts SET title=?,status=?,detail=?,quantity=?,price=?,last_checked=?,next_check=?,last_transport=? WHERE id=?',
                      (result.title, status, result.detail, result.quantity, result.price, now,
-                      now + settings['interval'], alert['id']))
+                      following, result.transport, alert['id']))
         db.event(conn, alert['id'], status, result.detail, now)
         if not result.available:
             conn.execute('UPDATE alerts SET last_sent_signature=NULL,notification_error=NULL WHERE id=?', (alert['id'],))
@@ -74,7 +77,7 @@ def run_check(db, alert, checker, sender=notify, clock=time.time):
             with db.connect() as conn:
                 conn.execute('UPDATE alerts SET notification_error=? WHERE id=?',
                              ('Stock found. Enable global email settings to receive notifications.', alert['id']))
-            return
+            return True
         try:
             sender(settings, alert, result)
         except Exception as exc:
@@ -89,6 +92,51 @@ def run_check(db, alert, checker, sender=notify, clock=time.time):
                              (result.signature, now, alert['id']))
                 if conn.execute('SELECT 1 FROM alerts WHERE id=?', (alert['id'],)).fetchone():
                     db.event(conn, alert['id'], 'notified', 'Stock alert email sent.', now)
+    return True
+
+
+def run_batch(db, factory=BatchChecker, sender=notify, clock=time.time, should_stop=lambda: False):
+    batch = claim_batch(db, clock())
+    if batch is None:
+        return None
+    checker = None
+    completed = 0
+    summary = 'Completed'
+    processed = set()
+    try:
+        checker = factory(db.directory / 'browser-profile', transport=db.settings()['transport'])
+        for alert in batch.alerts:
+            if should_stop():
+                summary = 'Interrupted; remaining alerts queued'
+                break
+            if db.retailer()['blocked_until'] > clock():
+                summary = 'Paused by retailer; remaining alerts deferred together'
+                break
+            if run_check(db, alert, checker, sender, clock, next_run=batch.next_run):
+                completed += 1
+            processed.add(alert['id'])
+        if db.retailer()['blocked_until'] > clock():
+            summary = 'Paused by retailer; remaining alerts deferred together'
+    except Exception:
+        summary = 'Interrupted; remaining alerts queued'
+        log.exception('Batch %s failed', batch.id)
+    finally:
+        try:
+            if checker:
+                checker.close()
+        finally:
+            if summary.startswith('Interrupted'):
+                with db.connect() as conn:
+                    for alert in batch.alerts:
+                        if alert['id'] not in processed:
+                            conn.execute("UPDATE alerts SET check_requested=1,request_reason='recovery' WHERE id=? AND enabled=1", (alert['id'],))
+            finish_batch(db, batch, clock(), completed,
+                         checker.http_requests if checker else 0,
+                         checker.browser_requests if checker else 0, summary)
+    log.info('Batch %s (%s): %s/%s alerts; HTTP=%s browser=%s; %s', batch.id, batch.kind,
+             completed, len(batch.alerts), checker.http_requests if checker else 0,
+             checker.browser_requests if checker else 0, summary)
+    return batch
 
 
 def main():
@@ -97,7 +145,6 @@ def main():
     # Only one polling worker can own this data directory.
     lock = open(db.directory / 'worker.lock', 'w')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    checker = BrowserChecker(db.directory / 'browser-profile')
     running = True
 
     def stop(*_):
@@ -108,22 +155,13 @@ def main():
     signal.signal(signal.SIGINT, stop)
     # Restart recovery: a killed browser check must not remain "checking" forever.
     with db.connect() as conn:
-        conn.execute("UPDATE alerts SET status='pending',next_check=0 WHERE status='checking'")
-    try:
-        while running:
-            now = time.time()
-            with db.connect() as conn:
-                conn.execute('INSERT OR REPLACE INTO worker_health(id,heartbeat) VALUES(1,?)', (now,))
-                state = conn.execute('SELECT * FROM retailer_state WHERE id=1').fetchone()
-                row = None
-                if now >= max(state['blocked_until'], state['last_request'] + 15):
-                    row = conn.execute('SELECT * FROM alerts WHERE enabled=1 AND next_check<=? ORDER BY next_check,id LIMIT 1', (now,)).fetchone()
-            if row:
-                run_check(db, dict(row), checker)
-            else:
-                time.sleep(2)
-    finally:
-        checker.close()
+        conn.execute("UPDATE alerts SET status='pending',check_requested=1,request_reason='recovery' WHERE enabled=1 AND (status='checking' OR last_batch_id IN (SELECT id FROM batch_runs WHERE finished_at IS NULL))")
+        conn.execute("UPDATE batch_runs SET finished_at=?,summary='Interrupted by restart; alerts queued' WHERE finished_at IS NULL", (time.time(),))
+    while running:
+        with db.connect() as conn:
+            conn.execute('INSERT OR REPLACE INTO worker_health(id,heartbeat) VALUES(1,?)', (time.time(),))
+        if run_batch(db, should_stop=lambda: not running) is None:
+            time.sleep(2)
 
 
 if __name__ == '__main__':

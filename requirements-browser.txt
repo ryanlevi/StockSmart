@@ -1,0 +1,4 @@
+# Optional: only needed for HTTP-first browser rendering and browser tests.
+-r requirements.txt
+selenium>=4.27.1,<5
+webdriver-manager>=4.0.2,<5

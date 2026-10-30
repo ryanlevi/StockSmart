@@ -15,7 +15,10 @@ This project is a fork of [ayoTyler/StockSmart](https://github.com/ayoTyler/Stoc
 - Product-link alerts for either regular new stock or open-box inventory.
 - Store-specific open-box counts, starting prices, and listing IDs when exposed by the product page.
 - Pause/resume, edit, delete, check-now, search, and check history.
-- Persistent SQLite storage and a background worker that runs while the browser is closed.
+- One global, clock-aligned schedule for all active alerts, with separate first/manual check requests.
+- One HTTP session per batch and one fetch per product/store, shared by both stock types.
+- HTTP-only operation by default; no browser dependencies or Chrome required.
+- Persistent SQLite storage and a background worker that runs while the UI is closed.
 - Duplicate-email suppression and retries after failed delivery.
 - Encrypted SMTP passwords on disk, CSRF-protected forms, and validated product URLs.
 
@@ -35,11 +38,12 @@ Store IDs come from the [official Micro Center store selector](https://www.micro
 ## Requirements
 
 - Python 3.12 (tested on Ubuntu 24.04).
-- Google Chrome and the Linux libraries it requires.
 - Git and Python virtual-environment support.
 - An SMTP mail server/account for email notifications.
 
-ChromeDriver is downloaded automatically by `webdriver-manager`; outbound access to its download service is required. Run the application and Chrome as an unprivileged user. Chrome's sandbox remains enabled.
+HTTP-only mode uses ordinary requests to Micro Center’s public product HTML and does not install or launch Selenium/Chrome. No supported public inventory API was verified during implementation. Generic shipping/JSON-LD availability is not used as a substitute for store-specific new/open-box stock.
+
+For the optional **HTTP first — browser for incomplete HTML** mode, install Google Chrome and `pip install -r requirements-browser.txt`. ChromeDriver is downloaded automatically by `webdriver-manager`. Run Chrome as an unprivileged user; its sandbox remains enabled. Explicit HTTP denials, verification challenges, and rate limits never trigger browser escalation.
 
 ## Installation
 
@@ -48,7 +52,7 @@ git clone https://github.com/ryanlevi/StockSmart.git
 cd StockSmart
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements-web.txt
+pip install -r requirements.txt
 ```
 
 Run the web UI and worker in separate terminals from the checkout, using the same data directory:
@@ -98,16 +102,24 @@ Proxmox can act as a mail relay if its mail service is configured to accept mail
 
 A notification is sent when stock is first found and again after it becomes unavailable and returns. Open-box alerts also notify when the listing/count/price signature changes. Unchanged availability does not produce an email every polling cycle. Failed email deliveries retry on subsequent successful stock checks.
 
-## Polling and current limitations
+## Batch scheduling and data sources
 
-- The default check interval is five minutes, configurable globally.
+The default interval is five minutes, configurable globally. Every active alert belongs to one scheduled batch at fixed clock boundaries (for example, `:00` / `:30` with a 30-minute interval). Requests are processed sequentially in that batch, not all fired concurrently at the retailer. Each batch owns one HTTP session; optional rendering shares one Chrome session only if needed. All clients are closed when the batch finishes.
+
+First checks, edits, resumed alerts, and manual checks use a separate immediate queue. They do not move the shared schedule. New requests arriving during a batch wait for the next worker turn. After a restart, missed schedule ticks coalesce into one batch. A batch that overlaps later ticks skips them rather than repeatedly catching up. Changing the interval moves every alert to the next boundary together.
+
+Each unique `(product ID, store ID)` is fetched once per batch, even when new-stock and open-box alerts both exist. The dashboard shows the next scheduled batch and the last run's alert count, HTTP requests, and browser loads. Stored batch metadata retains the latest 100 runs.
+
+**HTTP only** is the default under Global settings and never launches a browser. **HTTP first** optionally renders a successful but incomplete HTML document. `403`, `429`, challenge headers/pages, and `Retry-After` pauses stop/defer the batch without trying alternate access paths. Server-provided `Retry-After` is honored even if it exceeds the normal cooldown cap.
+
+## Current limitations
 - Verification-blocked checks pause all alerts. Repeated blocks back off for 15, 30, 60, 120, then at most 240 minutes. The cooldown survives worker restarts and manual checks cannot bypass it.
-- A persistent, unmodified Chrome profile is shared by the worker. Product pages are loaded directly, transient interstitials get up to 30 seconds to finish, distinct requests are spaced by at least 15 seconds, and a successful product page can serve both alert types for 60 seconds.
+- Distinct HTTP requests are spaced by at least 15 seconds. Optional browser rendering uses a private profile and bounded page-load waits. No browser is started in HTTP-only mode.
 - Stock is parsed only from the primary product purchase region and must identify the selected store. Related products and other-store availability are excluded.
 - Blocked, timed-out, and unrecognized pages are reported separately from sold-out stock.
 - Stock can sell out before an email arrives; an alert does not reserve inventory.
 
-**Micro Center may block automated browser access with a Cloudflare verification page.** This occurred during the initial deployment. The UI and worker correctly report **Blocked by Micro Center** and retry, but live successful inventory extraction could not be verified from that deployment. Cloudflare [does not support automated browsers for solving production challenges](https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/). Session reuse and bounded waits improve normal browsing reliability; they do not guarantee acceptance or solve a CAPTCHA. No fingerprint spoofing, proxy rotation, or CAPTCHA bypass is used. Open-box parsing is tested against fixtures based on Micro Center's observed purchase-region wording. Website markup changes may require parser updates.
+**Micro Center may block automated browser access with a Cloudflare verification page.** This occurred during deployment, including an HTTP probe returning `403` with `cf-mitigated: challenge`. The UI and worker report **Blocked by Micro Center** and preserve the shared cooldown. Switching to HTTP does not remove this retailer-side restriction; live successful inventory extraction could not be verified from the deployment. Cloudflare [does not support automated browsers for solving production challenges](https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/). Session reuse and bounded waits improve normal browsing reliability; they do not guarantee acceptance or solve a CAPTCHA. No fingerprint spoofing, proxy rotation, or CAPTCHA bypass is used. Open-box parsing is tested against fixtures based on Micro Center's observed purchase-region wording. Website markup changes may require parser updates.
 
 Real email delivery requires your own SMTP configuration and a successful test email. Automated SMTP tests use mocks.
 
@@ -123,10 +135,11 @@ Back up the entire data directory, including `secret.key`, together. That key al
 
 ```bash
 source .venv/bin/activate
+pip install -r requirements-browser.txt  # full suite includes optional browser tests
 python -m unittest discover -s tests -v
 ```
 
-Tests cover store mappings, regular/open-box separation, zero stock, listing changes, wrong-store responses, challenge pages, URL validation, alert CRUD, persistence, CSRF, encrypted settings, SMTP transports, duplicate suppression, and delivery retries.
+Tests cover store mappings, regular/open-box separation, zero stock, listing changes, wrong-store responses, challenge pages, URL validation, alert CRUD, persistence, CSRF, encrypted settings, SMTP transports, duplicate suppression, delivery retries, shared cadence, request exceptions, restart/overlap behavior, HTTP-only operation, deduplicated product fetches, and Retry-After handling.
 
 Keep the original repository available as an upstream remote:
 
